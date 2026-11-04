@@ -1,0 +1,172 @@
+/* =====================================================
+   OVERVIEW (first screen of every portal)
+   ===================================================== */
+
+.ov-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  text-align: left;
+}
+
+.ov-greeting {
+  margin: 0 0 6px;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-weight: 600;
+  font-size: 26px;
+  letter-spacing: 0;
+  color: #16171a;
+}
+
+.ov-subtitle {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 14px;
+  color: #767680;
+}
+
+/* ---------- "needs your attention" banners ---------- */
+
+.ov-attention {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ov-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-radius: 14px;
+  border: 1px solid #f0e3e4;
+  border-left-width: 4px;
+  background: #fff;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.ov-banner-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ov-banner-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #26262b;
+}
+
+.ov-banner-btn {
+  flex: none;
+  padding: 7px 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 9px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.ov-banner-btn:hover {
+  background: currentColor;
+}
+
+.ov-banner-btn:hover {
+  color: #fff;
+}
+
+.ov-banner-warn { color: #ed6c02; border-left-color: #ed6c02; background: #fff8f0; }
+.ov-banner-info { color: #9c2a35; border-left-color: #9c2a35; background: #fdf4f4; }
+.ov-banner-ok   { color: #2e7d32; border-left-color: #2e7d32; background: #f3faf3; }
+
+/* ---------- stat cards ---------- */
+
+.ov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 16px;
+}
+
+.ov-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 20px;
+  border: 1px solid #f0e3e4;
+  border-radius: 16px;
+  background: #fff;
+  text-align: left;
+  font-family: 'Inter', system-ui, sans-serif;
+  box-shadow: 0 12px 28px -24px rgba(30, 20, 20, 0.5);
+}
+
+.ov-stat-click {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.ov-stat-click:hover {
+  transform: translateY(-2px);
+  border-color: #e4c9cb;
+  box-shadow: 0 18px 32px -22px rgba(30, 20, 20, 0.5);
+}
+
+.ov-stat-click:focus-visible {
+  outline: 3px solid rgba(255, 107, 120, 0.5);
+  outline-offset: 2px;
+}
+
+.ov-stat-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #8a8a92;
+}
+
+.ov-stat-value {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.ov-stat-hint {
+  font-size: 12px;
+  color: #9a9aa2;
+}
+
+.ov-tone-default { color: #16171a; }
+.ov-tone-accent  { color: #9c2a35; }
+.ov-tone-good    { color: #2e7d32; }
+.ov-tone-warn    { color: #ed6c02; }
+.ov-tone-bad     { color: #c62828; }
+.ov-tone-muted   { color: #767680; }
+
+/* ---------- quick actions ---------- */
+
+.ov-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+@media (max-width: 520px) {
+  .ov-greeting { font-size: 22px; }
+  .ov-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .ov-stat { padding: 14px 14px; }
+  .ov-stat-value { font-size: 23px; }
+  .ov-banner { flex-wrap: wrap; }
+  .ov-banner-text { flex-basis: calc(100% - 24px); }
+  .ov-actions > button { flex: 1 1 100%; }
+}

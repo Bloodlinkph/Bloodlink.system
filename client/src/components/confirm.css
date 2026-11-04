@@ -1,0 +1,124 @@
+    /* =====================================================
+    CONFIRM DIALOG ("Are you sure?")
+    Rendered into .db-page by ConfirmDialog.jsx so it keeps the portal's colors
+    ===================================================== */
+
+    .cf-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(20, 10, 12, 0.55);
+    backdrop-filter: blur(3px);
+    animation: cf-fade 0.15s ease both;
+    }
+
+    .cf-dialog {
+    width: 100%;
+    max-width: 420px;
+    padding: 28px 24px 22px;
+    border-radius: 18px;
+    background: #fff;
+    text-align: center;
+    box-shadow: 0 30px 70px -20px rgba(0, 0, 0, 0.55);
+    font-family: 'Inter', system-ui, sans-serif;
+    animation: cf-rise 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+
+    .cf-icon {
+    width: 46px;
+    height: 46px;
+    margin: 0 auto 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: #eef1fb;
+    color: #3b4a8a;
+    }
+
+    .cf-icon-danger {
+    background: #fdeaea;
+    color: #c62828;
+    }
+
+    .cf-icon svg {
+    width: 24px;
+    height: 24px;
+    }
+
+    .cf-title {
+    margin: 0 0 8px;
+    font-family: 'Playfair Display', Georgia, serif;
+    font-weight: 600;
+    font-size: 21px;
+    color: #16171a;
+    }
+
+    .cf-message {
+    margin: 0 0 22px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #56565e;
+    }
+
+    .cf-actions {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    }
+
+    .cf-confirm {
+    padding: 11px 20px;
+    border: none;
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    cursor: pointer;
+    transition: filter 0.12s ease, transform 0.12s ease;
+    }
+
+    .cf-confirm-danger {
+    background: linear-gradient(135deg, #d9363e, #a3162a);
+    }
+
+    .cf-confirm:hover {
+    filter: brightness(1.08);
+    transform: translateY(-1px);
+    }
+
+    .cf-confirm:focus-visible {
+    outline: 3px solid rgba(198, 40, 40, 0.4);
+    outline-offset: 2px;
+    }
+
+    @keyframes cf-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+    }
+
+    @keyframes cf-rise {
+    from { opacity: 0; transform: translateY(12px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @media (max-width: 480px) {
+    .cf-actions {
+        flex-direction: column-reverse;
+    }
+    .cf-actions > button {
+        width: 100%;
+    }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+    .cf-backdrop,
+    .cf-dialog {
+        animation: none;
+    }
+    }

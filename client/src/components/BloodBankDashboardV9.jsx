@@ -1,0 +1,1126 @@
+    import { useState, useEffect } from "react";
+    import api from "../api";
+    import NotificationBell, { NotificationsSection } from "./NotificationBell";
+    import ProfileSection from "./ProfileSection";
+    import ConfirmDialog from "./ConfirmDialog";
+    import { prettify } from "./Overview";
+    import { UNIT_HINT, UNIT_ERROR, UNIT_ML, formatUnits, formatChange, unitLabel, isValidUnits } from "./units";
+    import "./dashboard.css"; // still used by ProfileSection / NotificationsSection
+    import "./bloodbank-v9.css";
+
+    const GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
+    const MIN_UNITS = 10; // a group below this is "Low"; below half of it is "Critical"
+    const CRIT_RATIO = 0.5;
+
+    // red blood cell compatibility (same table the landing page uses)
+    const CAN_GIVE = {
+    "O-": GROUPS,
+    "O+": ["O+", "A+", "B+", "AB+"],
+    "A-": ["A-", "A+", "AB-", "AB+"],
+    "A+": ["A+", "AB+"],
+    "B-": ["B-", "B+", "AB-", "AB+"],
+    "B+": ["B+", "AB+"],
+    "AB-": ["AB-", "AB+"],
+    "AB+": ["AB+"],
+    };
+
+    const gtxt = (g) => String(g || "").replace("-", "−");
+    const level = (on) => {
+    const r = on / MIN_UNITS;
+    return r < CRIT_RATIO ? "Critical" : r < 1 ? "Low" : "Adequate";
+    };
+    const lvlCls = (l) => (l === "Critical" ? "crit" : l === "Low" ? "warn" : "ok");
+    const prCls = (u) => {
+    const v = String(u || "").toLowerCase();
+    return v.includes("crit") || v === "high" ? "pr-crit" : v === "medium" ? "pr-urg" : "pr-rtn";
+    };
+    const isOpenReq = (r) => r.status === "pending" || r.status === "matched";
+
+    function BloodBankDashboardV9({ user, onLogout }) {
+    const [active, setActive] = useState("dashboard");
+    const [menuOpen, setMenuOpen] = useState(false);
+
+    const [profile, setProfile] = useState(null);
+    const [inventory, setInventory] = useState([]);
+    const [donationHistory, setDonationHistory] = useState([]);
+    const [auditLog, setAuditLog] = useState([]);
+    const [auditLoading, setAuditLoading] = useState(false);
+    const [donors, setDonors] = useState([]);
+    const [requests, setRequests] = useState([]);
+    const [appointments, setAppointments] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState("");
+    const [message, setMessage] = useState("");
+
+    // filters
+    const [reqTab, setReqTab] = useState("open");
+    const [donorQ, setDonorQ] = useState("");
+    const [donorGroup, setDonorGroup] = useState("");
+    const [recipient, setRecipient] = useState("O+");
+
+    // log donation form
+    const [donorSearch, setDonorSearch] = useState("");
+    const [donorResults, setDonorResults] = useState([]);
+    const [selectedDonor, setSelectedDonor] = useState(null);
+    const [units, setUnits] = useState("1");
+    const [donationStatus, setDonationStatus] = useState("completed");
+    const [remarks, setRemarks] = useState("");
+    const [logging, setLogging] = useState(false);
+
+    // appointments
+    const [apptTab, setApptTab] = useState("upcoming");
+    const [cancelAppt, setCancelAppt] = useState(null); // waiting for "Are you sure?"
+    const [completeAppt, setCompleteAppt] = useState(null); // asks how many units were collected
+    const [completeUnits, setCompleteUnits] = useState("1");
+    const [completeErr, setCompleteErr] = useState("");
+    const [apptSearch, setApptSearch] = useState("");
+    const [apptResults, setApptResults] = useState([]);
+    const [apptDonor, setApptDonor] = useState(null);
+    const [apptWhen, setApptWhen] = useState("");
+    const [apptNotes, setApptNotes] = useState("");
+    const [booking, setBooking] = useState(false);
+
+    // reports
+    const [reportMonths, setReportMonths] = useState(6);
+
+    const isVerified = profile?.verified_status === "verified";
+
+    useEffect(() => {
+        window.scrollTo({ top: 0 });
+    }, [active]);
+
+    useEffect(() => {
+        if (!menuOpen) return;
+        const onKey = (e) => e.key === "Escape" && setMenuOpen(false);
+        document.addEventListener("keydown", onKey);
+        return () => document.removeEventListener("keydown", onKey);
+    }, [menuOpen]);
+
+    // ---------- data ----------
+    const loadAll = async (bankId) => {
+        try {
+        const [inv, don, dnr, req, apt] = await Promise.all([
+            api.get(`/bloodbanks/${bankId}/inventory`),
+            api.get(`/donations?blood_bank_id=${bankId}`),
+            api.get("/donors"),
+            api.get("/requests"),
+            api.get(`/appointments?blood_bank_id=${bankId}`),
+        ]);
+        setInventory(inv.data);
+        setDonationHistory(don.data);
+        setDonors(dnr.data);
+        setRequests(req.data);
+        setAppointments(apt.data);
+        } catch (err) {
+        setError("Failed to load blood bank data.");
+        }
+    };
+
+    const loadAudit = async (bankId) => {
+        setAuditLoading(true);
+        try {
+        const res = await api.get(`/bloodbanks/${bankId}/inventory/audit?limit=100`);
+        setAuditLog(res.data);
+        } catch (err) {
+        setError("Failed to load inventory history.");
+        } finally {
+        setAuditLoading(false);
+        }
+    };
+
+    const loadProfile = async (silent = false) => {
+        if (!silent) setLoading(true);
+        setError("");
+        try {
+        const res = await api.get(`/bloodbanks/profile/${user.user_id}`);
+        setProfile(res.data);
+        await loadAll(res.data.blood_bank_id);
+        } catch (err) {
+        setError("Failed to load your profile.");
+        } finally {
+        setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        loadProfile();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        if (active === "audit" && profile) loadAudit(profile.blood_bank_id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [active, profile]);
+
+    // ---------- actions ----------
+    const go = (id) => {
+        setActive(id);
+        setMenuOpen(false);
+        setMessage("");
+        setError("");
+    };
+
+    const handleInventoryChange = async (blood_type_id, newValue) => {
+        if (!isVerified) return;
+        if (!isValidUnits(newValue, { allowZero: true })) {
+        setError(UNIT_ERROR);
+        return;
+        }
+        setError("");
+        try {
+        const res = await api.put(`/bloodbanks/${profile.blood_bank_id}/inventory`, {
+            blood_type_id,
+            units_available: newValue,
+            changed_by: user.user_id,
+        });
+        if (res.data.changed) {
+            setMessage("Inventory updated.");
+            loadAll(profile.blood_bank_id);
+        }
+        } catch (err) {
+        setError(err.response?.data?.message || "Failed to update inventory.");
+        }
+    };
+
+    const handleDonorSearch = async (query) => {
+        setDonorSearch(query);
+        setSelectedDonor(null);
+        if (query.trim().length < 2) {
+        setDonorResults([]);
+        return;
+        }
+        try {
+        const res = await api.get(`/donors/search?q=${encodeURIComponent(query)}`);
+        setDonorResults(res.data);
+        } catch (err) {
+        setDonorResults([]);
+        }
+    };
+
+    const handleLogDonation = async (e) => {
+        e.preventDefault();
+        setError("");
+        setMessage("");
+        if (!selectedDonor) {
+        setError("Please select a donor from the search results.");
+        return;
+        }
+        if (!isValidUnits(units)) {
+        setError(UNIT_ERROR);
+        return;
+        }
+        setLogging(true);
+        try {
+        await api.post("/donations", {
+            donor_id: selectedDonor.donor_id,
+            blood_bank_id: profile.blood_bank_id,
+            units,
+            status: donationStatus,
+            remarks: remarks || null,
+        });
+        setMessage(`Donation logged for ${selectedDonor.full_name} (${unitLabel(units)}).`);
+        setSelectedDonor(null);
+        setDonorSearch("");
+        setDonorResults([]);
+        setUnits("1");
+        setDonationStatus("completed");
+        setRemarks("");
+        loadAll(profile.blood_bank_id);
+        } catch (err) {
+        setError(err.response?.data?.message || "Failed to log donation.");
+        } finally {
+        setLogging(false);
+        }
+    };
+
+    // ----- appointments -----
+    const handleApptSearch = async (q) => {
+        setApptSearch(q);
+        setApptDonor(null);
+        if (q.trim().length < 2) {
+        setApptResults([]);
+        return;
+        }
+        try {
+        const res = await api.get(`/donors/search?q=${encodeURIComponent(q)}`);
+        setApptResults(res.data);
+        } catch (err) {
+        setApptResults([]);
+        }
+    };
+
+    const handleBook = async (e) => {
+        e.preventDefault();
+        setError("");
+        setMessage("");
+        if (!apptDonor) {
+        setError("Please select a donor from the search results.");
+        return;
+        }
+        if (!apptWhen) {
+        setError("Pick a date and time.");
+        return;
+        }
+        setBooking(true);
+        try {
+        await api.post("/appointments", {
+            donor_id: apptDonor.donor_id,
+            blood_bank_id: profile.blood_bank_id,
+            scheduled_at: apptWhen,
+            notes: apptNotes || null,
+        });
+        setMessage(`Appointment booked for ${apptDonor.full_name}.`);
+        setApptDonor(null);
+        setApptSearch("");
+        setApptResults([]);
+        setApptWhen("");
+        setApptNotes("");
+        loadAll(profile.blood_bank_id);
+        } catch (err) {
+        setError(err.response?.data?.message || "Failed to book appointment.");
+        } finally {
+        setBooking(false);
+        }
+    };
+
+    const setApptStatus = async (id, status, extra = {}) => {
+        setError("");
+        setMessage("");
+        try {
+        await api.put(`/appointments/${id}`, { status, ...extra });
+        setMessage(
+            status === "cancelled" ? "Appointment cancelled."
+            : status === "no_show" ? "Appointment marked as no-show."
+            : "Appointment completed and donation recorded."
+        );
+        loadAll(profile.blood_bank_id);
+        } catch (err) {
+        setError(err.response?.data?.message || "Failed to update appointment.");
+        }
+    };
+
+    if (loading) {
+        return (
+        <div className="bbv9">
+            <p className="muted" style={{ padding: 24 }}>Loading...</p>
+        </div>
+        );
+    }
+
+    // ---------- derived data ----------
+    const stock = Object.fromEntries(inventory.map((i) => [i.blood_type, Number(i.units_available) || 0]));
+    const rows = GROUPS.map((g) => {
+        const on = stock[g] || 0;
+        const lvl = level(on);
+        return { g, on, lvl, cls: lvlCls(lvl), w: Math.min(100, (on / (MIN_UNITS * 2)) * 100) };
+    });
+    const total = rows.reduce((s, r) => s + r.on, 0);
+    const shortRows = rows.filter((r) => r.lvl !== "Adequate");
+    const critRows = rows.filter((r) => r.lvl === "Critical");
+    const openReqs = requests.filter(isOpenReq);
+    const completed = donationHistory.filter((d) => d.status === "completed").length;
+    const today = new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    const initials = (user.full_name || profile?.bank_name || "BB").split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+
+    // appointments
+    const apptTime = (a) => new Date(String(a.scheduled_at).replace(" ", "T"));
+    const fmtWhen = (s) => {
+        const d = new Date(String(s).replace(" ", "T"));
+        return isNaN(d) ? "—" : d.toLocaleString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+    };
+    const upcoming = appointments.filter((a) => a.status === "scheduled");
+    const apptTabs = [
+        { id: "upcoming", label: "Scheduled", list: upcoming },
+        { id: "completed", label: "Completed", list: appointments.filter((a) => a.status === "completed") },
+        { id: "closed", label: "Cancelled / no-show", list: appointments.filter((a) => a.status === "cancelled" || a.status === "no_show") },
+        { id: "all", label: "All", list: appointments },
+    ];
+    const shownAppts = (apptTabs.find((t) => t.id === apptTab) || apptTabs[0]).list;
+    const nowLocalMin = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+    // reports (built from this bank's donation records)
+    const monthKey = (v) => String(v).slice(0, 7);
+    const monthLabel = (k) => new Date(`${k}-01T00:00:00`).toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+    const monthList = Array.from({ length: reportMonths }, (_, i) => {
+        const d = new Date();
+        d.setDate(1);
+        d.setMonth(d.getMonth() - (reportMonths - 1 - i));
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    });
+    const monthly = monthList.map((k) => {
+        const list = donationHistory.filter((d) => monthKey(d.donation_date) === k);
+        const done = list.filter((d) => d.status === "completed");
+        return {
+        k,
+        label: monthLabel(k),
+        collected: done.reduce((s, d) => s + Number(d.units ?? d.volume_ml / UNIT_ML), 0),
+        completed: done.length,
+        deferred: list.filter((d) => d.status === "deferred").length,
+        cancelled: list.filter((d) => d.status === "cancelled").length,
+        };
+    });
+    const maxCollected = Math.max(1, ...monthly.map((m) => m.collected));
+    const stockScale = Math.max(MIN_UNITS * 2, ...rows.map((r) => r.on));
+    const exportCsv = () => {
+        const head = ["Month", "Collected (units)", "Completed donations", "Deferred", "Cancelled"];
+        const body = monthly.map((m) => [m.label, formatUnits(m.collected), m.completed, m.deferred, m.cancelled]);
+        const csv = "\ufeff" + [head, ...body].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+        const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `bloodlink-collections-${new Date().toISOString().slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    const attention = [];
+    if (!isVerified) {
+        attention.push({ n: "!", cls: "warn", t: "Not verified yet", s: `Status: ${profile?.verified_status}. Inventory is read-only until an admin verifies your blood bank.`, tab: "profile" });
+    }
+    if (shortRows.length) {
+        attention.push({ n: shortRows.length, cls: critRows.length ? "crit" : "warn", t: "Groups below minimum", s: shortRows.map((r) => `${gtxt(r.g)} ${r.lvl.toLowerCase()}`).join(", "), tab: "inventory" });
+    }
+    if (openReqs.length) {
+        attention.push({ n: openReqs.length, cls: "warn", t: "Open blood requests", s: `${formatUnits(openReqs.reduce((s, r) => s + Number(r.quantity_needed || 0), 0))} units requested in total`, tab: "requests" });
+    }
+
+    const nav = [
+        { h: "Operations" },
+        { id: "dashboard", label: "Dashboard" },
+        { id: "inventory", label: "Inventory" },
+        { id: "requests", label: "Requests", cnt: openReqs.length },
+        { id: "compat", label: "Compatibility" },
+        { id: "appointments", label: "Appointments", cnt: upcoming.length },
+        { h: "Records" },
+        { id: "donors", label: "Donors", cnt: donors.length },
+        { id: "log", label: "Log a donation" },
+        { id: "history", label: "Donation history" },
+        { id: "audit", label: "Inventory history" },
+        { id: "reports", label: "Reports" },
+        { h: "System" },
+        { id: "notifications", label: "Notifications" },
+        { id: "profile", label: "Edit profile" },
+    ];
+    const current = nav.find((n) => n.id === active) || nav[1];
+
+    // ---------- screens ----------
+    const Pill = ({ children }) => <span className="st">{children}</span>;
+
+    const filteredDonors = donors.filter((d) => {
+        const q = donorQ.trim().toLowerCase();
+        const hit = !q || [d.full_name, d.email, d.contact_number].some((v) => String(v || "").toLowerCase().includes(q));
+        return hit && (!donorGroup || d.blood_type === donorGroup);
+    });
+
+    const reqTabs = [
+        { id: "open", label: "Open", list: openReqs },
+        { id: "fulfilled", label: "Fulfilled", list: requests.filter((r) => r.status === "fulfilled") },
+        { id: "cancelled", label: "Cancelled", list: requests.filter((r) => r.status === "cancelled") },
+        { id: "all", label: "All", list: requests },
+    ];
+    const shownReqs = (reqTabs.find((t) => t.id === reqTab) || reqTabs[0]).list;
+
+    const donorsFor = (r) =>
+        GROUPS.filter((d) => CAN_GIVE[d].includes(r)).sort((a, b) => (a === r ? -1 : b === r ? 1 : CAN_GIVE[a].length - CAN_GIVE[b].length));
+
+    return (
+        <div className="bbv9">
+        <div className="app">
+            {/* ---------------- SIDEBAR ---------------- */}
+            <aside className={`side ${menuOpen ? "open" : ""}`}>
+            <div className="brand">
+                <div className="brand-name">Blood<span>Link</span></div>
+                <div className="brand-fac">{profile?.bank_name}</div>
+            </div>
+            <nav className="nav" aria-label="Blood bank portal sections">
+                {nav.map((n, i) =>
+                n.h ? (
+                    <div className="nav-h" key={`h${i}`}>{n.h}</div>
+                ) : (
+                    <button key={n.id} type="button" className={active === n.id ? "on" : ""} aria-current={active === n.id ? "page" : undefined} onClick={() => go(n.id)}>
+                    <span>{n.label}</span>
+                    {n.cnt > 0 && <span className="cnt">{n.cnt}</span>}
+                    </button>
+                )
+                )}
+            </nav>
+            </aside>
+            {menuOpen && <div className="scrim" onClick={() => setMenuOpen(false)} />}
+
+            <div className="main">
+            {/* ---------------- TOP BAR ---------------- */}
+            <header className="top">
+                <button type="button" className="top-btn menu-btn" aria-label="Open menu" onClick={() => setMenuOpen(true)}>Menu</button>
+                <div className="crumbs"><span>{profile?.bank_name}</span> / <b>{current.label}</b></div>
+                <div className="top-r">
+                <NotificationBell userId={user.user_id} />
+                <span className="vr" />
+                <span className="top-btn" style={{ cursor: "default" }}>
+                    <span className="avatar">{initials}</span>
+                    <span className="who"><b>{user.full_name || profile?.bank_name}</b><span>Blood bank</span></span>
+                </span>
+                <button type="button" className="top-btn" onClick={onLogout}>Log out</button>
+                </div>
+            </header>
+
+            <main id="content">
+                {message && <div className="msg ok">{message}</div>}
+                {error && <div className="msg err">{error}</div>}
+
+                {/* ============ DASHBOARD ============ */}
+                {active === "dashboard" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Operations overview</h1><p>{today} · {profile?.bank_name}</p></div>
+                    <div className="actions">
+                        <button type="button" className="btn" onClick={() => go("inventory")}>Open inventory</button>
+                        <button type="button" className="btn pri" onClick={() => go("log")}>Log a donation</button>
+                    </div>
+                    </div>
+
+                    <div className="grid-2">
+                    <div className="supply">
+                        <div>
+                        <div className="lbl">Blood on hand</div>
+                        <div className="big-row"><span className="big">{formatUnits(total)}</span><span className="unit">units</span></div>
+                        </div>
+                        <div>
+                        <div className="mix" role="img" aria-label="On hand by blood group">
+                            {rows.filter((r) => r.on > 0).map((r) => (
+                            <span key={r.g} style={{ flex: `${r.on} 1 0` }}>{r.on >= total * 0.08 ? gtxt(r.g) : ""}</span>
+                            ))}
+                        </div>
+                        <div className="mix-l">On hand by blood group, in proportion</div>
+                        </div>
+                        <div className="stats">
+                        <div className="stat"><div className="k">Groups low</div><div className="v">{shortRows.length}</div></div>
+                        <div className="stat"><div className="k">Open requests</div><div className="v">{openReqs.length}</div></div>
+                        <div className="stat"><div className="k">Donations logged</div><div className="v">{donationHistory.length}</div></div>
+                        <div className="stat"><div className="k">Completed</div><div className="v">{completed}</div></div>
+                        </div>
+                    </div>
+
+                    <div className="panel">
+                        <div className="panel-h"><h3>Needs attention</h3></div>
+                        <ul className="attn">
+                        {attention.length === 0 && <li className="ok-row">Nothing needs attention right now.</li>}
+                        {attention.map((a, i) => (
+                            <li key={i}>
+                            <button type="button" onClick={() => go(a.tab)}>
+                                <span className="t"><b>{a.t}</b><span>{a.s}</span></span>
+                                <span className={`n ${a.cls}`}>{a.n}</span>
+                            </button>
+                            </li>
+                        ))}
+                        </ul>
+                    </div>
+                    </div>
+
+                    <div className="panel">
+                    <div className="panel-h">
+                        <h3>Stock by blood group<span className="sub">Minimum level: {MIN_UNITS} units per group</span></h3>
+                        <div className="actions"><button type="button" className="link" onClick={() => go("inventory")}>Open inventory</button></div>
+                    </div>
+                    <div className="tw">
+                        <table>
+                        <thead><tr><th>Group</th><th className="r">On hand</th><th className="r">Minimum</th><th>Stock level</th><th>Status</th></tr></thead>
+                        <tbody>
+                            {rows.map((r) => (
+                            <tr key={r.g}>
+                                <td><b className="grp">{gtxt(r.g)}</b></td>
+                                <td className="r num"><b>{formatUnits(r.on)}</b></td>
+                                <td className="r num">{MIN_UNITS}</td>
+                                <td><div className={`lvl ${r.cls === "ok" ? "" : r.cls}`}><i style={{ width: `${r.w}%` }} /><b /></div></td>
+                                <td><span className={`st ${r.cls}`}>{r.lvl}</span></td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    </div>
+
+                    <div className="grid-3">
+                    <div className="panel">
+                        <div className="panel-h"><h3>Open requests</h3><button type="button" className="link" onClick={() => go("requests")}>View all</button></div>
+                        <div className="tw">
+                        <table>
+                            <thead><tr><th>Requester</th><th>Group</th><th className="r">Units</th><th>Priority</th></tr></thead>
+                            <tbody>
+                            {openReqs.length === 0 && <tr><td colSpan="4" className="empty">No open requests.</td></tr>}
+                            {openReqs.slice(0, 5).map((q) => (
+                                <tr key={q.request_id}>
+                                <td className="wrap">{q.requester_name}</td>
+                                <td><b className="grp">{gtxt(q.blood_type)}</b></td>
+                                <td className="r num">{formatUnits(q.quantity_needed)}</td>
+                                <td><span className={prCls(q.urgency_level)}>{prettify(q.urgency_level)}</span></td>
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+
+                    <div className="panel">
+                        <div className="panel-h"><h3>Recent donations</h3><button type="button" className="link" onClick={() => go("history")}>View all</button></div>
+                        <div className="tw">
+                        <table>
+                            <thead><tr><th>Donor</th><th className="r">Units</th><th>Date</th><th>Status</th></tr></thead>
+                            <tbody>
+                            {donationHistory.length === 0 && <tr><td colSpan="4" className="empty">No donations logged yet.</td></tr>}
+                            {donationHistory.slice(0, 5).map((d) => (
+                                <tr key={d.donation_id}>
+                                <td className="wrap">{d.donor_name}</td>
+                                <td className="r num">{formatUnits(d.units ?? d.volume_ml / UNIT_ML)}</td>
+                                <td>{d.donation_date}</td>
+                                <td><Pill>{prettify(d.status)}</Pill></td>
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ INVENTORY ============ */}
+                {active === "inventory" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Inventory</h1><p>Blood on hand by group. Edit a number and click outside the box to save.</p></div>
+                    </div>
+                    {!isVerified && (
+                    <div className="msg err">Inventory is read-only until an admin verifies your blood bank (status: {profile?.verified_status}).</div>
+                    )}
+                    <div className="panel">
+                    <div className="tw">
+                        <table>
+                        <thead><tr><th>Blood group</th><th className="r">Units available</th><th>Stock level</th><th>Status</th><th>Last updated</th></tr></thead>
+                        <tbody>
+                            {inventory.map((item) => {
+                            const on = Number(item.units_available) || 0;
+                            const lvl = level(on);
+                            const c = lvlCls(lvl);
+                            return (
+                                <tr key={`${item.blood_type_id}-${item.units_available}`}>
+                                <td><b className="grp">{gtxt(item.blood_type)}</b></td>
+                                <td className="r">
+                                    <input
+                                    className="in"
+                                    type="number"
+                                    min="0"
+                                    step="0.5"
+                                    style={{ width: 90 }}
+                                    disabled={!isVerified}
+                                    defaultValue={formatUnits(item.units_available)}
+                                    onBlur={(e) => handleInventoryChange(item.blood_type_id, e.target.value)}
+                                    />
+                                </td>
+                                <td><div className={`lvl ${c === "ok" ? "" : c}`}><i style={{ width: `${Math.min(100, (on / (MIN_UNITS * 2)) * 100)}%` }} /><b /></div></td>
+                                <td><span className={`st ${c}`}>{lvl}</span></td>
+                                <td>{item.last_updated || "—"}</td>
+                                </tr>
+                            );
+                            })}
+                        </tbody>
+                        </table>
+                    </div>
+                    <div className="foot-note"><span>{UNIT_HINT}</span></div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ REQUESTS ============ */}
+                {active === "requests" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Blood requests</h1><p>Requests posted by patients and hospitals. Donor matching is handled by the system.</p></div>
+                    </div>
+                    <div className="panel">
+                    <div className="tabs">
+                        {reqTabs.map((t) => (
+                        <button key={t.id} type="button" className={reqTab === t.id ? "on" : ""} onClick={() => setReqTab(t.id)}>
+                            {t.label}<span className="c">{t.list.length}</span>
+                        </button>
+                        ))}
+                    </div>
+                    <div className="tw">
+                        <table>
+                        <thead><tr><th>Ref</th><th>Requester</th><th>Group</th><th className="r">Units</th><th>Priority</th><th>Location</th><th>Requested</th><th>Status</th></tr></thead>
+                        <tbody>
+                            {shownReqs.length === 0 && <tr><td colSpan="8" className="empty">Nothing here.</td></tr>}
+                            {shownReqs.map((q) => (
+                            <tr key={q.request_id}>
+                                <td className="mono">#{q.request_id}</td>
+                                <td className="wrap">{q.requester_name}</td>
+                                <td><b className="grp">{gtxt(q.blood_type)}</b></td>
+                                <td className="r num">{formatUnits(q.quantity_needed)}</td>
+                                <td><span className={prCls(q.urgency_level)}>{prettify(q.urgency_level)}</span></td>
+                                <td className="wrap">{q.location_needed || "—"}</td>
+                                <td>{q.date_requested}</td>
+                                <td><Pill>{prettify(q.status)}</Pill></td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ COMPATIBILITY ============ */}
+                {active === "compat" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Red cell compatibility</h1><p>ABO and Rh reference for choosing alternative units when the matching group is short.</p></div>
+                    </div>
+                    <div className="grid-3">
+                    <div className="panel">
+                        <div className="panel-h">
+                        <h3>Compatible donor groups</h3>
+                        <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            Recipient
+                            <select className="in sel" style={{ width: 96 }} value={recipient} onChange={(e) => setRecipient(e.target.value)}>
+                            {GROUPS.map((g) => <option key={g} value={g}>{gtxt(g)}</option>)}
+                            </select>
+                        </label>
+                        </div>
+                        <div className="tw">
+                        <table>
+                            <thead><tr><th>Donor group</th><th>Preference</th><th className="r">In stock</th><th>Stock status</th></tr></thead>
+                            <tbody>
+                            {donorsFor(recipient).map((d) => {
+                                const on = stock[d] || 0;
+                                const lvl = level(on);
+                                return (
+                                <tr key={d}>
+                                    <td><b className="grp">{gtxt(d)}</b></td>
+                                    <td>{d === recipient ? "Same group" : d === "O-" ? "Universal donor, keep for emergencies" : "Compatible"}</td>
+                                    <td className="r num"><b>{formatUnits(on)}</b></td>
+                                    <td><span className={`st ${lvlCls(lvl)}`}>{lvl}</span></td>
+                                </tr>
+                                );
+                            })}
+                            </tbody>
+                        </table>
+                        </div>
+                        <div className="foot-note"><span>Reference only. Confirm with crossmatch and follow the hospital transfusion protocol.</span></div>
+                    </div>
+
+                    <div className="panel">
+                        <div className="panel-h"><h3>Compatibility matrix</h3><span className="muted">Donor (rows) to recipient (columns)</span></div>
+                        <div className="tw">
+                        <table className="matrix">
+                            <thead>
+                            <tr><th>Donor</th>{GROUPS.map((r) => <th key={r}>{gtxt(r)}</th>)}</tr>
+                            </thead>
+                            <tbody>
+                            {GROUPS.map((d) => (
+                                <tr key={d}>
+                                <th><b className="grp">{gtxt(d)}</b></th>
+                                {GROUPS.map((r) => (
+                                    CAN_GIVE[d].includes(r)
+                                    ? <td key={r} className="yes">✓</td>
+                                    : <td key={r} className="no">–</td>
+                                ))}
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ APPOINTMENTS ============ */}
+                {active === "appointments" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Appointments</h1><p>Donors scheduled to donate at {profile?.bank_name}.</p></div>
+                    </div>
+                    {!isVerified && (
+                    <div className="msg err">Appointments can only be booked once an admin verifies your blood bank (status: {profile?.verified_status}).</div>
+                    )}
+                    <div className="grid-3">
+                    <div className="panel">
+                        <div className="tabs">
+                        {apptTabs.map((t) => (
+                            <button key={t.id} type="button" className={apptTab === t.id ? "on" : ""} onClick={() => setApptTab(t.id)}>
+                            {t.label}<span className="c">{t.list.length}</span>
+                            </button>
+                        ))}
+                        </div>
+                        <div className="tw">
+                        <table>
+                            <thead><tr><th>Donor</th><th>Group</th><th>When</th><th>Status</th><th className="r">Actions</th></tr></thead>
+                            <tbody>
+                            {shownAppts.length === 0 && <tr><td colSpan="5" className="empty">No appointments here.</td></tr>}
+                            {shownAppts.map((a) => {
+                                const overdue = a.status === "scheduled" && apptTime(a) < new Date();
+                                const tone = a.status === "completed" ? "ok" : a.status === "scheduled" ? (overdue ? "warn" : "info") : a.status === "no_show" ? "warn" : "crit";
+                                return (
+                                <tr key={a.appointment_id}>
+                                    <td className="wrap">{a.donor_name}{a.notes && <span className="sub">{a.notes}</span>}</td>
+                                    <td><b className="grp">{gtxt(a.blood_type)}</b></td>
+                                    <td>{fmtWhen(a.scheduled_at)}</td>
+                                    <td><span className={`st ${tone}`}>{overdue ? "Overdue" : prettify(a.status)}</span></td>
+                                    <td className="r">
+                                    {a.status === "scheduled" && (
+                                        <span style={{ display: "inline-flex", gap: 6 }}>
+                                        <button type="button" className="btn pri sm" onClick={() => { setCompleteUnits("1"); setCompleteErr(""); setCompleteAppt(a); }}>Complete</button>
+                                        <button type="button" className="btn sm" onClick={() => setApptStatus(a.appointment_id, "no_show")}>No-show</button>
+                                        <button type="button" className="btn danger sm" onClick={() => setCancelAppt(a)}>Cancel</button>
+                                        </span>
+                                    )}
+                                    </td>
+                                </tr>
+                                );
+                            })}
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+
+                    <div className="panel">
+                        <div className="panel-h"><h3>Book an appointment</h3></div>
+                        <form className="form-narrow" onSubmit={handleBook}>
+                        <div className="search-wrap">
+                            <label>Search donor (name or email)</label>
+                            <input className="in" type="text" value={apptSearch} onChange={(e) => handleApptSearch(e.target.value)} placeholder="Start typing a name or email..." disabled={!isVerified} />
+                            {apptResults.length > 0 && (
+                            <div className="dd">
+                                {apptResults.map((d) => (
+                                <button
+                                    type="button"
+                                    key={d.donor_id}
+                                    onClick={() => {
+                                    setApptDonor(d);
+                                    setApptSearch(`${d.full_name} (${d.blood_type})`);
+                                    setApptResults([]);
+                                    }}
+                                >
+                                    {d.full_name} — {d.email} — {d.blood_type}
+                                </button>
+                                ))}
+                            </div>
+                            )}
+                        </div>
+                        <div>
+                            <label>Date and time</label>
+                            <input className="in" type="datetime-local" min={nowLocalMin} value={apptWhen} onChange={(e) => setApptWhen(e.target.value)} disabled={!isVerified} />
+                        </div>
+                        <div>
+                            <label>Notes (optional)</label>
+                            <input className="in" type="text" maxLength={255} value={apptNotes} onChange={(e) => setApptNotes(e.target.value)} disabled={!isVerified} />
+                        </div>
+                        <div>
+                            <button type="submit" className="btn pri" disabled={booking || !isVerified}>{booking ? "Booking..." : "Book appointment"}</button>
+                        </div>
+                        </form>
+                    </div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ DONORS ============ */}
+                {active === "donors" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Donors</h1><p>{donors.length} registered donors</p></div>
+                    <div className="actions"><button type="button" className="btn pri" onClick={() => go("log")}>Log a donation</button></div>
+                    </div>
+                    <div className="panel">
+                    <div className="toolbar">
+                        <input className="in" type="search" placeholder="Name, email or phone" value={donorQ} onChange={(e) => setDonorQ(e.target.value)} aria-label="Search donors" />
+                        <select className="in sel" value={donorGroup} onChange={(e) => setDonorGroup(e.target.value)} aria-label="Blood group">
+                        <option value="">All groups</option>
+                        {GROUPS.map((g) => <option key={g} value={g}>{gtxt(g)}</option>)}
+                        </select>
+                    </div>
+                    <div className="tw tall">
+                        <table>
+                        <thead><tr><th>Name</th><th>Group</th><th>Contact</th><th>Email</th><th>Last donation</th><th>Availability</th><th>Eligibility</th></tr></thead>
+                        <tbody>
+                            {filteredDonors.length === 0 && <tr><td colSpan="7" className="empty">No donors match.</td></tr>}
+                            {filteredDonors.map((d) => (
+                            <tr key={d.donor_id}>
+                                <td className="wrap">{d.full_name}</td>
+                                <td><b className="grp">{gtxt(d.blood_type)}</b></td>
+                                <td>{d.contact_number}</td>
+                                <td className="wrap">{d.email}</td>
+                                <td>{d.last_donation_date || "—"}</td>
+                                <td><span className={`st ${d.availability_status === "available" ? "ok" : ""}`}>{prettify(d.availability_status)}</span></td>
+                                <td><span className={`st ${d.eligibility_status === "eligible" ? "ok" : "warn"}`}>{prettify(d.eligibility_status)}</span></td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    <div className="foot-note"><span>Showing {filteredDonors.length} of {donors.length}</span></div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ LOG A DONATION ============ */}
+                {active === "log" && (
+                <section className="tab">
+                    <div className="page-h"><div><h1>Log a donation</h1><p>Record a donation received at {profile?.bank_name}.</p></div></div>
+                    <div className="panel">
+                    <form className="form-narrow" onSubmit={handleLogDonation}>
+                        <div className="search-wrap">
+                        <label>Search donor (name or email)</label>
+                        <input className="in" type="text" value={donorSearch} onChange={(e) => handleDonorSearch(e.target.value)} placeholder="Start typing a name or email..." />
+                        {donorResults.length > 0 && (
+                            <div className="dd">
+                            {donorResults.map((d) => (
+                                <button
+                                type="button"
+                                key={d.donor_id}
+                                onClick={() => {
+                                    setSelectedDonor(d);
+                                    setDonorSearch(`${d.full_name} (${d.blood_type})`);
+                                    setDonorResults([]);
+                                }}
+                                >
+                                {d.full_name} — {d.email} — {d.blood_type}
+                                </button>
+                            ))}
+                            </div>
+                        )}
+                        </div>
+                        {selectedDonor && <div className="muted">Selected: <b>{selectedDonor.full_name}</b> ({selectedDonor.blood_type})</div>}
+                        <div>
+                        <label>Units donated</label>
+                        <input className="in" type="number" min="0.5" step="0.5" value={units} onChange={(e) => setUnits(e.target.value)} />
+                        <div className="muted" style={{ marginTop: 4 }}>{UNIT_HINT}</div>
+                        </div>
+                        <div>
+                        <label>Status</label>
+                        <select className="in sel" value={donationStatus} onChange={(e) => setDonationStatus(e.target.value)}>
+                            <option value="completed">Completed</option>
+                            <option value="deferred">Deferred</option>
+                            <option value="cancelled">Cancelled</option>
+                        </select>
+                        </div>
+                        <div>
+                        <label>Remarks (optional)</label>
+                        <input className="in" type="text" value={remarks} onChange={(e) => setRemarks(e.target.value)} />
+                        </div>
+                        <div>
+                        <button type="submit" className="btn pri" disabled={logging}>{logging ? "Logging..." : "Log donation"}</button>
+                        </div>
+                    </form>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ DONATION HISTORY ============ */}
+                {active === "history" && (
+                <section className="tab">
+                    <div className="page-h"><div><h1>Donation history</h1><p>Every donation logged by this blood bank.</p></div></div>
+                    <div className="panel">
+                    <div className="tw tall">
+                        <table>
+                        <thead><tr><th>Donor</th><th className="r">Units</th><th>Date</th><th>Status</th></tr></thead>
+                        <tbody>
+                            {donationHistory.length === 0 && <tr><td colSpan="4" className="empty">No donations logged yet.</td></tr>}
+                            {donationHistory.map((d) => (
+                            <tr key={d.donation_id}>
+                                <td className="wrap">{d.donor_name}</td>
+                                <td className="r num">{formatUnits(d.units ?? d.volume_ml / UNIT_ML)}</td>
+                                <td>{d.donation_date}</td>
+                                <td><Pill>{prettify(d.status)}</Pill></td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ INVENTORY HISTORY ============ */}
+                {active === "audit" && (
+                <section className="tab">
+                    <div className="page-h"><div><h1>Inventory history</h1><p>Every change to your stock numbers, with who made it.</p></div></div>
+                    <div className="panel">
+                    <div className="tw tall">
+                        <table>
+                        <thead><tr><th>When</th><th>Group</th><th className="r">Old</th><th className="r">New</th><th className="r">Change</th><th>Changed by</th></tr></thead>
+                        <tbody>
+                            {auditLoading && <tr><td colSpan="6" className="empty">Loading history...</td></tr>}
+                            {!auditLoading && auditLog.length === 0 && <tr><td colSpan="6" className="empty">No inventory changes recorded yet.</td></tr>}
+                            {!auditLoading && auditLog.map((a) => (
+                            <tr key={a.audit_id}>
+                                <td>{a.changed_at}</td>
+                                <td><b className="grp">{gtxt(a.blood_type)}</b></td>
+                                <td className="r num">{formatUnits(a.old_units)}</td>
+                                <td className="r num">{formatUnits(a.new_units)}</td>
+                                <td className="r num"><b style={{ color: a.change_units > 0 ? "var(--green)" : "var(--red)" }}>{formatChange(a.change_units)}</b></td>
+                                <td>{a.changed_by_name}</td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ REPORTS ============ */}
+                {active === "reports" && (
+                <section className="tab">
+                    <div className="page-h">
+                    <div><h1>Reports</h1><p>Collections and stock for {profile?.bank_name}, from your donation records.</p></div>
+                    <div className="actions">
+                        <select className="in sel" style={{ width: 150 }} value={reportMonths} onChange={(e) => setReportMonths(Number(e.target.value))} aria-label="Period">
+                        <option value={3}>Last 3 months</option>
+                        <option value={6}>Last 6 months</option>
+                        <option value={12}>Last 12 months</option>
+                        </select>
+                        <button type="button" className="btn" onClick={exportCsv}>Export CSV</button>
+                        <button type="button" className="btn" onClick={() => window.print()}>Print</button>
+                    </div>
+                    </div>
+
+                    <div className="grid-eq">
+                    <div className="panel">
+                        <div className="panel-h"><h3>Collections</h3><span className="muted">Units per month (completed donations)</span></div>
+                        <div className="bb-bars">
+                        {monthly.map((m) => (
+                            <div className="bb-bar" key={m.k}>
+                            <div className="bb-col">
+                                <div className="bb-stack" style={{ height: `${(m.collected / maxCollected) * 100}%` }}>
+                                <span className="v">{formatUnits(m.collected)}</span>
+                                </div>
+                            </div>
+                            <span className="l">{m.label}</span>
+                            </div>
+                        ))}
+                        </div>
+                    </div>
+
+                    <div className="panel">
+                        <div className="panel-h"><h3>On hand against minimum</h3><span className="muted">Minimum: {MIN_UNITS} units per group</span></div>
+                        <div className="bb-bars">
+                        {rows.map((r) => (
+                            <div className="bb-bar" key={r.g}>
+                            <div className="bb-col">
+                                <div className={`bb-stack ${r.cls}`} style={{ height: `${(r.on / stockScale) * 100}%` }}>
+                                <span className="v">{formatUnits(r.on)}</span>
+                                </div>
+                            </div>
+                            <span className="l">{gtxt(r.g)}</span>
+                            </div>
+                        ))}
+                        </div>
+                        <div className="legend">
+                        <span><i className="sw" style={{ background: "var(--green)" }} />Adequate</span>
+                        <span><i className="sw" style={{ background: "var(--amber)" }} />Low</span>
+                        <span><i className="sw" style={{ background: "var(--alert)" }} />Critical</span>
+                        </div>
+                        <div className="foot-note"><span>Below {MIN_UNITS} is Low; below {MIN_UNITS * CRIT_RATIO} is Critical.</span></div>
+                    </div>
+                    </div>
+
+                    <div className="panel">
+                    <div className="panel-h"><h3>Monthly summary</h3></div>
+                    <div className="tw">
+                        <table>
+                        <thead>
+                            <tr><th>Month</th><th className="r">Collected (units)</th><th className="r">Completed</th><th className="r">Deferred</th><th className="r">Cancelled</th></tr>
+                        </thead>
+                        <tbody>
+                            {[...monthly].reverse().map((m) => (
+                            <tr key={m.k}>
+                                <td>{m.label}</td>
+                                <td className="r num"><b>{formatUnits(m.collected)}</b></td>
+                                <td className="r num">{m.completed}</td>
+                                <td className="r num">{m.deferred}</td>
+                                <td className="r num">{m.cancelled}</td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    <div className="foot-note"><span>Issued units, wastage and hospital figures are not tracked yet.</span></div>
+                    </div>
+                </section>
+                )}
+
+                {/* ============ NOTIFICATIONS ============ */}
+                {active === "notifications" && (
+                <section className="tab">
+                    <div className="page-h"><div><h1>Notifications</h1><p>Updates about your blood bank.</p></div></div>
+                    <div className="bbv9-embed"><NotificationsSection userId={user.user_id} /></div>
+                </section>
+                )}
+
+                {/* ============ EDIT PROFILE ============ */}
+                {active === "profile" && (
+                <section className="tab">
+                    <div className="page-h"><div><h1>Edit profile</h1><p>Blood bank details and sign-in settings.</p></div></div>
+                    <div className="bbv9-embed"><ProfileSection userId={user.user_id} onSaved={() => loadProfile(true)} /></div>
+                </section>
+                )}
+            </main>
+            </div>
+        </div>
+
+        <ConfirmDialog
+            open={!!cancelAppt}
+            title="Cancel this appointment?"
+            message={cancelAppt ? `${cancelAppt.donor_name}'s appointment on ${fmtWhen(cancelAppt.scheduled_at)} will be cancelled and they will be notified.` : ""}
+            confirmLabel="Yes, cancel"
+            cancelLabel="No, go back"
+            onCancel={() => setCancelAppt(null)}
+            onConfirm={() => {
+            const id = cancelAppt.appointment_id;
+            setCancelAppt(null);
+            setApptStatus(id, "cancelled");
+            }}
+        />
+
+        <ConfirmDialog
+            open={!!completeAppt}
+            danger={false}
+            title="Complete this appointment?"
+            message={completeAppt ? `This records ${completeAppt.donor_name}'s donation at your blood bank and thanks them in the app.` : ""}
+            confirmLabel="Complete and record"
+            cancelLabel="Not yet"
+            onCancel={() => setCompleteAppt(null)}
+            onConfirm={() => {
+            if (!isValidUnits(completeUnits)) {
+                setCompleteErr(UNIT_ERROR);
+                return;
+            }
+            const id = completeAppt.appointment_id;
+            const collected = completeUnits;
+            setCompleteAppt(null);
+            setApptStatus(id, "completed", { units: collected });
+            }}
+        >
+            {/* inline styles: this dialog is portaled outside .bbv9, so scoped classes would not apply */}
+            <div style={{ textAlign: "left", margin: "0 0 20px" }}>
+            <label htmlFor="complete-units" style={{ display: "block", marginBottom: 6, fontSize: 13, fontWeight: 600, color: "#2b1a1d" }}>
+                Units collected
+            </label>
+            <input
+                id="complete-units"
+                type="number"
+                min="0.5"
+                step="0.5"
+                value={completeUnits}
+                onChange={(e) => { setCompleteUnits(e.target.value); setCompleteErr(""); }}
+                style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 14, fontFamily: "inherit", border: "1.5px solid #ecd9db", borderRadius: 10 }}
+            />
+            <small style={{ display: "block", marginTop: 6, fontSize: 12, color: "#8a8a92" }}>{UNIT_HINT}</small>
+            {completeErr && <p style={{ margin: "8px 0 0", fontSize: 13, color: "#a12a2a" }}>{completeErr}</p>}
+            </div>
+        </ConfirmDialog>
+        </div>
+    );
+    }
+
+    export default BloodBankDashboardV9;
