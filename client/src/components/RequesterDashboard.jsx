@@ -1,24 +1,31 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import api from "../api";
 import NotificationBell, { NotificationsSection } from "./NotificationBell";
 import ProfileSection from "./ProfileSection";
 import ConfirmDialog from "./ConfirmDialog";
 import LocationPicker from "./LocationPicker";
-import { UNIT_HINT, UNIT_ERROR, formatUnits, unitLabel, isValidUnits } from "./units";
+import FieldError from "./FieldError";
+import {
+  validate, hasErrors, required, optional, when, units as unitsRule, address as addressRule, minLen, maxLen,
+  bloodType as bloodTypeRule, lettersOnly, focusFirstError,
+} from "../validation";
+import { UNIT_HINT, formatUnits, unitLabel } from "./units";
 import "./dashboard.css";
 import "./bloodbank-v9.css";
+import Loading from "./Loading";
 
 const REQUEST_TONE = { pending: "warn", matched: "info", fulfilled: "ok" };
 const URGENCY_TONE = { medium: "info", high: "warn", critical: "crit" };
-const MATCH_TONE = { proposed: "warn", accepted: "info", confirmed: "ok", declined: "crit" };
-const MATCH_LABEL = { proposed: "Request sent", accepted: "Donor accepted", confirmed: "Confirmed" };
-// a match that is still alive; a declined one frees the request to find another donor
-const ACTIVE_MATCH = ["proposed", "accepted", "confirmed"];
+const MATCH_LABEL = { proposed: "Request sent", accepted: "Donor accepted", confirmed: "Confirmed", declined: "Declined", expired: "Not needed" };
+// 1 donor gives 1 unit, so 1.5 units needs 2 donors. You may ask a few donors per unit at once
+// (backups); the first ones to accept fill the request and the rest are released automatically.
+// Must match MAX_ASKS_PER_UNIT on the server.
+const MAX_ASKS_PER_UNIT = 3;
+const donorsNeeded = (qty) => Math.max(1, Math.ceil(Number(qty) || 0));
 
 const SUBTITLES = {
   post: "Tell nearby donors what blood you need.",
-  requests: "Requests you have posted.",
-  matches: "Eligible donors for the selected request.",
+  requests: "Requests you have posted. Tap Find Donor on a request to see its eligible donors.",
   profile: "Personal details and sign-in settings.",
   notifications: "Updates about your requests.",
 };
@@ -62,6 +69,9 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
   const [patientRelationship, setPatientRelationship] = useState("");
   const [hospitalName, setHospitalName] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [fe, setFe] = useState({}); // inline messages for the new-request form
+  const clearFe = (key) => setFe((p) => (p[key] ? { ...p, [key]: "" } : p)); // red message goes away when edited
+  const [editErrors, setEditErrors] = useState({}); // inline messages for the edit-request dialog
 
   // the first-screen choice is made once, on the first successful load
   const didPickDefault = useRef(false);
@@ -71,6 +81,9 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
   const [matchedDonors, setMatchedDonors] = useState([]);
   const [matchLoading, setMatchLoading] = useState(false);
   const [cancelReq, setCancelReq] = useState(null); // request waiting for "Are you sure?"
+  const [fulfilReq, setFulfilReq] = useState(null);   // request waiting for "Mark as fulfilled?"
+  const [editReq, setEditReq] = useState(null);       // request being edited
+  const [edit, setEdit] = useState({ quantity: "", urgency: "medium", hospital: "", location: "" });
 
   // switching screens clears old banners
   const goTo = (id) => {
@@ -153,12 +166,27 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
     setError("");
     setMessage("");
 
-    if (!isValidUnits(quantity)) {
-      setError(UNIT_ERROR);
-      return;
-    }
-    if (urgency === "critical" && !urgencyReason.trim()) {
-      setError("Tell us why this is critical so a blood bank can verify it.");
+    const isCritical = (all) => all.urgency === "critical";
+    const found = validate(
+      {
+        bloodType, quantity, urgency, urgencyReason, hospitalName, location, patientName, patientRelationship,
+      },
+      {
+        bloodType: [required("Blood type"), bloodTypeRule],
+        quantity: [required("Units needed"), unitsRule("Units needed")],
+        patientName: [optional(lettersOnly("Patient name")), maxLen(100, "Patient name")],
+        patientRelationship: [when((all) => String(all.patientName || "").trim() !== "", required("Relationship"))],
+        urgencyReason: [
+          when(isCritical, required("Reason")),
+          when(isCritical, minLen(10, "Reason")),
+        ],
+        hospitalName: [when(isCritical, required("Hospital or clinic")), maxLen(150, "Hospital or clinic")],
+        location: [optional(addressRule("Location needed"))],
+      }
+    );
+    setFe(found);
+    if (hasErrors(found)) {
+      focusFirstError(e.currentTarget);
       return;
     }
     setSubmitting(true);
@@ -169,7 +197,9 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
         blood_type: bloodType,
         quantity_needed: quantity,
         urgency_level: urgency, // "critical" is only a claim; the server saves it as pending verification
-        urgency_reason: urgency === "critical" ? urgencyReason.trim() : null,
+        // SPRINT 2 FIX: the server reads critical_claim / critical_reason (it used to get "urgency_reason" and rejected it)
+        critical_claim: urgency === "critical",
+        critical_reason: urgency === "critical" ? urgencyReason.trim() : null,
         location_needed: location,
         latitude: latitude === "" ? null : latitude,
         longitude: longitude === "" ? null : longitude,
@@ -195,11 +225,16 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
     }
   };
 
+  // opens the donor list right under the request; tapping again (or another request) switches/closes it
   const viewMatches = async (requestId) => {
     setMessage("");
     setError("");
+    if (selectedRequestId === requestId) {
+      setSelectedRequestId(null);
+      setMatchedDonors([]);
+      return;
+    }
     setSelectedRequestId(requestId);
-    setActive("matches"); // open the Matched Donors screen
     setMatchLoading(true);
     setMatchedDonors([]);
     try {
@@ -212,9 +247,29 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
     }
   };
 
-  // the live (not declined) match of a request, if any
-  const activeMatchFor = (requestId) =>
-    matches.find((m) => m.request_id === requestId && ACTIVE_MATCH.includes(m.match_status));
+  // how full a request is: donors needed, donors who said yes, donors still deciding
+  const capacityFor = (r) => {
+    const mine = matches.filter((m) => m.request_id === r.request_id);
+    const needed = donorsNeeded(r.quantity_needed);
+    const filled = mine.filter((m) => m.match_status === "accepted" || m.match_status === "confirmed").length;
+    const waiting = mine.filter((m) => m.match_status === "proposed").length;
+    const maxOpen = needed * MAX_ASKS_PER_UNIT;
+    return { needed, filled, waiting, maxOpen, full: filled >= needed, canAsk: filled < needed && filled + waiting < maxOpen };
+  };
+
+  // take back an unanswered request so you can ask someone else
+  const withdrawMatch = async (matchId) => {
+    setMessage("");
+    setError("");
+    try {
+      await api.put(`/matches/${matchId}`, { match_status: "expired" });
+      setMessage("Request to that donor withdrawn.");
+      loadEverything(true);
+    } catch (err) {
+      setError(err.response?.data?.message || "Failed to withdraw the request.");
+      loadEverything(true);
+    }
+  };
 
   // "Request match" can be clicked only once per donor and request
   const requestMatch = async (donorId, distance) => {
@@ -233,8 +288,8 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
       loadEverything(true); // the buttons now show the status instead
     } catch (err) {
       // the button stays disabled for good, even if this failed (reload the page to try again)
+      setError(err.response?.data?.message || "Failed to create match.");
       if (err.response?.status === 409) loadEverything(true);
-      else setError(err.response?.data?.message || "Failed to create match.");
     }
   };
 
@@ -255,12 +310,63 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
     }
   };
 
-  const selectedRequest = myRequests.find((r) => r.request_id === selectedRequestId);
+  // SPRINT 2 FIX: the requester closes a request once a donor accepted it
+  const markFulfilled = async (requestId) => {
+    setMessage("");
+    setError("");
+    try {
+      await api.put(`/requests/${requestId}`, { status: "fulfilled" });
+      setMessage("Request marked as fulfilled. Thank you!");
+      if (selectedRequestId === requestId) { setSelectedRequestId(null); setMatchedDonors([]); }
+      loadEverything(true);
+    } catch (err) {
+      setError(err.response?.data?.message || "Failed to mark the request as fulfilled.");
+    }
+  };
+
+  // SPRINT 2 FIX: edit an open request (blood type stays locked)
+  const openEdit = (r) => {
+    setEdit({
+      quantity: String(r.quantity_needed ?? ""),
+      urgency: r.urgency_level === "critical" ? "critical" : (r.urgency_level || "medium"),
+      hospital: r.hospital_name || "",
+      location: r.location_needed || "",
+    });
+    setEditErrors({});
+    setEditReq(r);
+  };
+  const saveEdit = async () => {
+    const r = editReq;
+    const found = validate(edit, {
+      quantity: [required("Units needed"), unitsRule("Units needed")],
+      hospital: [maxLen(150, "Hospital or clinic")],
+      location: [optional(addressRule("Location needed"))],
+    });
+    setEditErrors(found);
+    if (hasErrors(found)) return; // keep the dialog open so the messages are visible
+    setEditReq(null);
+    setMessage("");
+    setError("");
+    try {
+      const body = {
+        quantity_needed: edit.quantity,
+        hospital_name: edit.hospital.trim(),
+        location_needed: edit.location.trim(),
+      };
+      if (r.critical_status !== "confirmed") body.urgency_level = edit.urgency;
+      await api.put(`/requests/${r.request_id}/details`, body);
+      setMessage("Request updated. Donors with a live match were told.");
+      loadEverything(true);
+    } catch (err) {
+      setError(err.response?.data?.message || "Failed to update the request.");
+    }
+  };
+
 
   if (loading) {
     return (
       <div className="bbv9" style={{ display: "grid", placeItems: "center" }}>
-        <p className="muted">Loading...</p>
+        <p className="muted"><Loading label="Loading..." /></p>
       </div>
     );
   }
@@ -272,7 +378,6 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
       items: [
         { id: "post", label: "Post a blood request" },
         { id: "requests", label: "My blood requests" },
-        { id: "matches", label: "Matched donors" },
       ],
     },
     {
@@ -370,17 +475,18 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
               {/* POST A BLOOD REQUEST */}
               {current.id === "post" && (
                 <div className="panel">
-                  <form onSubmit={handleSubmitRequest} className="form-narrow">
+                  <form onSubmit={handleSubmitRequest} className="form-narrow" noValidate>
                     <div className="form-grid">
                       <div>
                         <label>Blood type needed</label>
-                        <select className="in" value={bloodType} onChange={(e) => setBloodType(e.target.value)} required>
+                        <select className="in" value={bloodType} onChange={(e) => { setBloodType(e.target.value); clearFe("bloodType"); }} aria-invalid={!!fe.bloodType} aria-describedby="err-rq-bt">
                           <option value="">Select blood type</option>
                           <option>A+</option><option>A-</option>
                           <option>B+</option><option>B-</option>
                           <option>O+</option><option>O-</option>
                           <option>AB+</option><option>AB-</option>
                         </select>
+                        <FieldError id="err-rq-bt" message={fe.bloodType} />
                       </div>
 
                       <div>
@@ -391,10 +497,12 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                           min="0.5"
                           step="0.5"
                           value={quantity}
-                          onChange={(e) => setQuantity(e.target.value)}
+                          onChange={(e) => { setQuantity(e.target.value); clearFe("quantity"); }}
                           placeholder="e.g. 1 or 1.5"
-                          required
+                          aria-invalid={!!fe.quantity}
+                          aria-describedby="err-rq-units"
                         />
+                        <FieldError id="err-rq-units" message={fe.quantity} />
                       </div>
 
                       <div className="full">
@@ -409,18 +517,23 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                           type="text"
                           className="in"
                           value={patientName}
-                          onChange={(e) => setPatientName(e.target.value)}
+                          onChange={(e) => { setPatientName(e.target.value); clearFe("patientName"); clearFe("patientRelationship"); }}
                           placeholder="Leave blank if it's for you"
                           maxLength={100}
+                          aria-invalid={!!fe.patientName}
+                          aria-describedby="err-rq-patient"
                         />
+                        <FieldError id="err-rq-patient" message={fe.patientName} />
                       </div>
                       <div>
                         <label>Relationship to you</label>
                         <select
                           className="in"
                           value={patientRelationship}
-                          onChange={(e) => setPatientRelationship(e.target.value)}
+                          onChange={(e) => { setPatientRelationship(e.target.value); clearFe("patientRelationship"); }}
                           disabled={!patientName.trim()}
+                          aria-invalid={!!fe.patientRelationship}
+                          aria-describedby="err-rq-rel"
                         >
                           <option value="">Select</option>
                           <option value="mother">Mother</option>
@@ -432,12 +545,13 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                           <option value="friend">Friend</option>
                           <option value="other">Other</option>
                         </select>
+                        <FieldError id="err-rq-rel" message={fe.patientRelationship} />
                       </div>
                     </div>
 
                     <div>
                       <label>Urgency level</label>
-                      <select className="in" value={urgency} onChange={(e) => setUrgency(e.target.value)}>
+                      <select className="in" value={urgency} onChange={(e) => { setUrgency(e.target.value); clearFe("urgencyReason"); clearFe("hospitalName"); }}>
                         <option value="low">Low</option>
                         <option value="medium">Medium</option>
                         <option value="high">High</option>
@@ -452,11 +566,13 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                           type="text"
                           className="in"
                           value={urgencyReason}
-                          onChange={(e) => setUrgencyReason(e.target.value)}
+                          onChange={(e) => { setUrgencyReason(e.target.value); clearFe("urgencyReason"); }}
                           placeholder="e.g. Surgery tomorrow 8 am, diagnosis, hospital"
                           maxLength={255}
-                          required
+                          aria-invalid={!!fe.urgencyReason}
+                          aria-describedby="err-rq-reason"
                         />
+                        <FieldError id="err-rq-reason" message={fe.urgencyReason} />
                         <small className="muted">
                           A blood bank or admin will verify this. Until then your request shows as High.
                         </small>
@@ -464,15 +580,18 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                     )}
 
                     <div>
-                      <label>Hospital / clinic and ward (optional)</label>
+                      <label>Hospital / clinic and ward{urgency === "critical" ? " (required for critical)" : " (optional)"}</label>
                       <input
                         type="text"
                         className="in"
                         value={hospitalName}
-                        onChange={(e) => setHospitalName(e.target.value)}
-                        placeholder="e.g. Baliuag District Hospital, Ward 3"
+                        onChange={(e) => { setHospitalName(e.target.value); clearFe("hospitalName"); }}
+                        placeholder="e.g. Nueva Vizcaya Provincial Hospital, Ward 3"
                         maxLength={150}
+                        aria-invalid={!!fe.hospitalName}
+                        aria-describedby="err-rq-hosp"
                       />
+                      <FieldError id="err-rq-hosp" message={fe.hospitalName} />
                     </div>
 
                     <div>
@@ -481,9 +600,12 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                         type="text"
                         className="in"
                         value={location}
-                        onChange={(e) => setLocation(e.target.value)}
-                        placeholder="e.g. Baliuag District Hospital"
+                        onChange={(e) => { setLocation(e.target.value); clearFe("location"); }}
+                        placeholder="e.g. Nueva Vizcaya Provincial Hospital"
+                        aria-invalid={!!fe.location}
+                        aria-describedby="err-rq-loc"
                       />
+                      <FieldError id="err-rq-loc" message={fe.location} />
                     </div>
 
                     <div>
@@ -528,9 +650,11 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                         <tbody>
                           {myRequests.map((r) => {
                             const open = r.status === "pending" || r.status === "matched";
-                            const live = activeMatchFor(r.request_id);
+                            const cap = capacityFor(r);
+                            const asked = cap.filled + cap.waiting > 0;
                             return (
-                              <tr key={r.request_id}>
+                              <Fragment key={r.request_id}>
+                              <tr className={selectedRequestId === r.request_id ? "row-open" : ""}>
                                 <td><span className="grp">{r.blood_type}</span></td>
                                 <td className="r num">{formatUnits(r.quantity_needed)}</td>
                                 <td>
@@ -541,20 +665,33 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                                 <td><Status value={r.status} tones={REQUEST_TONE} /></td>
                                 <td className="r">
                                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                                    {open && live ? (
+                                    {open && asked ? (
                                       <>
-                                        {/* a request was sent: the Find Donor button is replaced by its status */}
-                                        <span className={`st ${MATCH_TONE[live.match_status] || ""}`}>{MATCH_LABEL[live.match_status]}</span>
+                                        {/* donors were asked: show how many said yes out of how many are needed */}
+                                        <span className={`st ${cap.full ? "ok" : cap.filled ? "info" : "warn"}`}>
+                                          {cap.filled}/{cap.needed} donor{cap.needed > 1 ? "s" : ""}
+                                          {cap.waiting > 0 && !cap.full ? `, ${cap.waiting} waiting` : ""}
+                                        </span>
                                         <button type="button" className="btn sm" onClick={() => viewMatches(r.request_id)}>
-                                          Matched Donors
+                                          {selectedRequestId === r.request_id ? "Hide donors" : "View donors"}
                                         </button>
                                       </>
                                     ) : open ? (
                                       /* no match yet, or the donor declined: Find Donor is back */
                                       <button type="button" className="btn pri sm" onClick={() => viewMatches(r.request_id)}>
-                                        Find Donor
+                                        {selectedRequestId === r.request_id ? "Hide donors" : "Find Donor"}
                                       </button>
                                     ) : null}
+                                    {open && (
+                                      <button type="button" className="btn sm" onClick={() => openEdit(r)}>
+                                        Edit
+                                      </button>
+                                    )}
+                                    {r.status === "matched" && (
+                                      <button type="button" className="btn pri sm" onClick={() => setFulfilReq(r)}>
+                                        Mark fulfilled
+                                      </button>
+                                    )}
                                     {open && (
                                       <button type="button" className="btn danger sm" onClick={() => setCancelReq(r)}>
                                         Cancel
@@ -563,36 +700,30 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                                   </span>
                                 </td>
                               </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* MATCHED DONORS */}
-              {current.id === "matches" && (
-                <div className="panel">
-                  {!selectedRequestId ? (
-                    <div className="empty">
-                      Open <b>My blood requests</b> and choose “View matched donors” on a request to see its matches here.
-                    </div>
-                  ) : (
-                    <>
-                      <div className="panel-h">
-                        <h3>
-                          Request #{selectedRequestId}
-                          {selectedRequest && (
-                            <span className="sub">
-                              {unitLabel(selectedRequest.quantity_needed)} of {selectedRequest.blood_type}
-                            </span>
-                          )}
-                        </h3>
-                      </div>
+                              {selectedRequestId === r.request_id && (
+                                <tr className="donor-row">
+                                  <td colSpan={5} style={{ padding: 0, whiteSpace: "normal", background: "var(--bg, #fafafa)" }}>
+                                    <div style={{ padding: "10px 12px" }}>
+                                      <div className="muted" style={{ marginBottom: 8, fontSize: 13 }}>
+                                        Eligible donors for <b>{unitLabel(r.quantity_needed)} of {r.blood_type}</b>
+                                        {" "}· you need <b>{cap.needed}</b> donor{cap.needed > 1 ? "s" : ""} (1 donor = 1 unit)
+                                        {" "}· <b>{cap.filled}</b> accepted, <b>{cap.waiting}</b> waiting
+                                      </div>
+                                      {cap.full ? (
+                                        <div className="msg ok" style={{ marginBottom: 8, fontSize: 13 }}>
+                                          This request has all the donors it needs. Other donors you asked were told they are no longer needed.
+                                        </div>
+                                      ) : !cap.canAsk ? (
+                                        <div className="msg err" style={{ marginBottom: 8, fontSize: 13 }}>
+                                          You have asked {cap.maxOpen} donors at once, the most allowed for {unitLabel(r.quantity_needed)}. Wait for an answer, or withdraw one to ask someone else.
+                                        </div>
+                                      ) : (
+                                        <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
+                                          You can ask up to {cap.maxOpen} donors at once. The first {cap.needed > 1 ? `${cap.needed} to accept fill` : "one to accept fills"} the request; anyone else still waiting is released automatically.
+                                        </div>
+                                      )}
                       {matchLoading ? (
-                        <div className="empty">Searching for eligible donors...</div>
+                        <div className="empty"><Loading label="Searching for eligible donors..." /></div>
                       ) : matchedDonors.length === 0 ? (
                         <div className="empty">No available compatible donors found nearby.</div>
                       ) : (
@@ -603,15 +734,15 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                                 <th>Name</th>
                                 <th>Blood type</th>
                                 <th>Contact</th>
-                                <th className="r">Distance (km)</th>
+                                <th>Location</th>
                                 <th className="r">Action</th>
                               </tr>
                             </thead>
                             <tbody>
                               {matchedDonors.map((d) => {
-                                const live = activeMatchFor(selectedRequestId);
-                                const past = matchFor(selectedRequestId, d.donor_id); // already asked this donor before
-                                const clicked = sending.has(`${selectedRequestId}:${d.donor_id}`);
+                                const past = matchFor(r.request_id, d.donor_id)
+                                  || (d.match_status ? { match_status: d.match_status } : null); // already asked this donor before
+                                const clicked = sending.has(`${r.request_id}:${d.donor_id}`);
                                 // once clicked (or already asked, even if declined) the button is disabled for good
                                 const locked = clicked || !!past;
                                 return (
@@ -619,19 +750,27 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                                     <td>{d.full_name}</td>
                                     <td><span className="grp">{d.blood_type}</span></td>
                                     <td>{d.contact_number}</td>
-                                    <td className="r num">{d.distance_km ?? "N/A"}</td>
+                                    <td className="wrap">{d.location || "Not specified"}</td>
                                     <td className="r">
-                                      <button
-                                        type="button"
-                                        className="btn pri sm"
-                                        disabled={locked || !!live}
-                                        title={live && !locked ? "This request already has a donor" : undefined}
-                                        onClick={() => requestMatch(d.donor_id, d.distance_km)}
-                                      >
-                                        {past
-                                          ? past.match_status === "declined" ? "Declined" : MATCH_LABEL[past.match_status] || "Request sent"
-                                          : clicked ? "Request sent" : "Request match"}
-                                      </button>
+                                      <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                                        <button
+                                          type="button"
+                                          className="btn pri sm"
+                                          disabled={locked || !cap.canAsk}
+                                          title={!locked && cap.full ? "This request already has all the donors it needs"
+                                            : !locked && !cap.canAsk ? `You can ask up to ${cap.maxOpen} donors at once` : undefined}
+                                          onClick={() => requestMatch(d.donor_id, d.distance_km)}
+                                        >
+                                          {past
+                                            ? MATCH_LABEL[past.match_status] || "Request sent"
+                                            : clicked ? "Request sent" : "Request match"}
+                                        </button>
+                                        {past?.match_status === "proposed" && past.match_id && (
+                                          <button type="button" className="btn sm" onClick={() => withdrawMatch(past.match_id)}>
+                                            Withdraw
+                                          </button>
+                                        )}
+                                      </span>
                                     </td>
                                   </tr>
                                 );
@@ -640,7 +779,16 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
                           </table>
                         </div>
                       )}
-                    </>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                              </Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   )}
                 </div>
               )}
@@ -662,6 +810,60 @@ function RequesterDashboard({ user, onLogout, modeSwitch }) {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!fulfilReq}
+        title="Mark this request as fulfilled?"
+        message={fulfilReq ? `Confirm that you received the ${fulfilReq.blood_type} blood you asked for. The request will be closed and can't be reopened.` : ""}
+        confirmLabel="Yes, it's fulfilled"
+        cancelLabel="Not yet"
+        danger={false}
+        onCancel={() => setFulfilReq(null)}
+        onConfirm={() => { const id = fulfilReq.request_id; setFulfilReq(null); markFulfilled(id); }}
+      />
+
+      <ConfirmDialog
+        open={!!editReq}
+        title={editReq ? `Edit request #${editReq.request_id}` : "Edit request"}
+        message="Blood type can't be changed because donors were matched on it. Donors with a live match will be told."
+        confirmLabel="Save changes"
+        cancelLabel="Close"
+        danger={false}
+        onCancel={() => setEditReq(null)}
+        onConfirm={saveEdit}
+      >
+        {editReq && (
+          <div style={{ display: "grid", gap: 10, margin: "12px 0" }}>
+            <div>
+              <label>Units needed</label>
+              <input className="in" value={edit.quantity} onChange={(e) => { setEdit({ ...edit, quantity: e.target.value }); setEditErrors((p) => ({ ...p, quantity: "" })); }} placeholder="e.g. 1 or 1.5" aria-invalid={!!editErrors.quantity} aria-describedby="err-ed-units" />
+              <FieldError id="err-ed-units" message={editErrors.quantity} />
+            </div>
+            <div>
+              <label>Urgency level</label>
+              {editReq.critical_status === "confirmed" ? (
+                <input className="in" value="Critical (confirmed, can't be lowered)" disabled />
+              ) : (
+                <select className="in" value={edit.urgency === "critical" ? "high" : edit.urgency} onChange={(e) => setEdit({ ...edit, urgency: e.target.value })}>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              )}
+            </div>
+            <div>
+              <label>Hospital / clinic</label>
+              <input className="in" value={edit.hospital} maxLength={150} onChange={(e) => { setEdit({ ...edit, hospital: e.target.value }); setEditErrors((p) => ({ ...p, hospital: "" })); }} aria-invalid={!!editErrors.hospital} aria-describedby="err-ed-hosp" />
+              <FieldError id="err-ed-hosp" message={editErrors.hospital} />
+            </div>
+            <div>
+              <label>Location needed</label>
+              <input className="in" value={edit.location} onChange={(e) => { setEdit({ ...edit, location: e.target.value }); setEditErrors((p) => ({ ...p, location: "" })); }} aria-invalid={!!editErrors.location} aria-describedby="err-ed-loc" />
+              <FieldError id="err-ed-loc" message={editErrors.location} />
+            </div>
+          </div>
+        )}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={!!cancelReq}

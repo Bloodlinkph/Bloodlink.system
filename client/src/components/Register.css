@@ -1,5 +1,9 @@
-/* Loaded after Login.css, so these rules refine the shared .bl-* styles */
+/* Loaded after Login.css, so these rules refine the shared .bl-* styles.
+   The full-screen layout below only applies to pages whose root is
+   <div className="bl-page bl-auth">  (Login and Register).
+   The reset-password page is not affected. */
 
+/* ---------- select arrow ---------- */
 .bl-input-wrap .bl-role-select {
   appearance: none;
   -webkit-appearance: none;
@@ -10,81 +14,223 @@
   cursor: pointer;
 }
 
-.bl-field-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
+/* =====================================================
+   FULL SCREEN: the card fills the whole browser window
+   ===================================================== */
+.bl-page.bl-auth {
+  padding: 0;
+  align-items: stretch;
+  justify-content: stretch;
 }
 
-/* "Donor details", "Blood bank details", etc. with a trailing line */
-.bl-section-label {
+.bl-auth .bl-card {
+  max-width: none;
+  min-height: 100svh;
+  border-radius: 0;
+  box-shadow: none;
+  grid-template-columns: 1fr 1fr;   /* half maroon cover, half white */
+}
+
+.bl-auth .bl-hero {
+  padding: 48px 36px 190px;
+}
+
+.bl-auth .bl-hero-description {
+  max-width: 360px;
+}
+
+/* =====================================================
+   WHITE PANEL: heading on top, form underneath, all left-aligned.
+   Nothing scrolls inside the panel; if the window is very short,
+   the whole page scrolls instead.
+   ===================================================== */
+.bl-auth .bl-form-panel {
+  --auth-w: 460px;                      /* login: narrow column */
+  --auth-pad: clamp(28px, 4.6vw, 68px);
+  container-type: inline-size;
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  font-weight: 700;
-  color: #9c2a35;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  margin: 24px 0 14px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: clamp(60px, 9vh, 100px) var(--auth-pad) 24px;
+  text-align: left;
 }
 
-.bl-section-label::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, rgba(156, 42, 53, 0.4), transparent);
+.bl-auth .bl-form-panel.bl-wide {
+  --auth-w: 820px;                      /* register: wide form, starts at the top */
 }
 
-/* scrollable form with a soft fade so users see there is more below */
-.bl-form-scroll {
-  max-height: 56vh;
-  overflow-y: auto;
-  padding: 2px 8px 24px 2px;
-  margin-right: -6px;
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+/* login (no .bl-wide): the whole block sits in the middle of the white side */
+.bl-auth .bl-form-panel:not(.bl-wide) {
+  justify-content: center;
+  padding-top: 64px;
+  padding-bottom: 64px;
 }
 
-.bl-form-scroll::-webkit-scrollbar {
-  width: 6px;
+/* every block shares the same left edge and maximum width */
+.bl-auth .bl-form-panel > *:not(.bl-back) {
+  width: 100%;
+  max-width: var(--auth-w);
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
 }
 
-.bl-form-scroll::-webkit-scrollbar-thumb {
-  background: rgba(156, 42, 53, 0.3);
-  border-radius: 6px;
+/* "Back to home" lines up with the content's left edge */
+.bl-auth .bl-form-panel > .bl-back {
+  position: absolute;
+  top: 22px;
+  left: max(var(--auth-pad), calc((100% - var(--auth-w)) / 2 - 10px));
+  margin: 0;
 }
 
-.bl-form-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(156, 42, 53, 0.55);
+.bl-auth .bl-eyebrow { margin-bottom: 10px; }
+
+.bl-auth .bl-heading {
+  font-size: clamp(30px, 3vw, 40px);
+  line-height: 1.12;
+  margin-bottom: 8px;
+  text-align: left;
 }
 
-.bl-form-scroll small {
+.bl-auth .bl-subheading {
+  margin: 0 0 16px;
+  text-align: left;
+}
+
+.bl-auth .bl-field label {
+  text-align: left;
+}
+
+/* links under the button stay centered */
+.bl-auth .bl-footer-text,
+.bl-auth .bl-secure-note {
+  text-align: center;
+  justify-content: center;
+}
+
+/* not scrollable any more */
+.bl-auth .bl-form-scroll {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  margin-top: 0;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.bl-auth .bl-form-scroll small {
   color: #8a8a92 !important;
 }
 
-.bl-form-panel .bl-heading {
-  font-size: 32px;
+/* =====================================================
+   REGISTER FORM GRID
+   ===================================================== */
+.bl-auth .bl-reg-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: 16px;
+  align-items: start;
 }
 
-.bl-form-panel .bl-subheading {
-  margin-bottom: 18px;
+/* column spans on the 12-column grid: s12 = full row, s6 = half, s3 = quarter */
+.bl-auth .bl-s12 { grid-column: span 12; }
+.bl-auth .bl-s6 { grid-column: span 6; }
+.bl-auth .bl-s3 { grid-column: span 3; }
+
+.bl-auth .bl-reg-grid .bl-field {
+  margin-bottom: 12px;
 }
 
-@media (max-width: 780px) {
-  .bl-form-scroll {
-    max-height: none;
-    overflow: visible;
-    -webkit-mask-image: none;
-    mask-image: none;
-    margin-right: 0;
-    padding: 0;
+.bl-auth .bl-reg-grid .bl-field label {
+  margin-bottom: 5px;
+}
+
+.bl-auth .bl-reg-grid .bl-input-wrap input,
+.bl-auth .bl-reg-grid .bl-input-wrap select {
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+
+.bl-auth .bl-name-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 84px;
+  column-gap: 16px;
+}
+
+.bl-auth .bl-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #9a9aa2;
+}
+
+/* Sign Up button: full width, at the bottom of the form */
+.bl-auth .bl-reg-grid .bl-submit {
+  margin-top: 8px;
+}
+
+.bl-auth .bl-form-panel .bl-footer-text {
+  margin-top: 16px;
+}
+
+/* =====================================================
+   HALF-AND-HALF SCREENS: the white side is narrower, so the register
+   form uses three fields per row instead of four
+   ===================================================== */
+@media (min-width: 1101px) {
+  @container (max-width: 760px) {
+    .bl-auth .bl-t3 { grid-column: span 4; }      /* contact, blood type, requester type */
+    .bl-auth .bl-hosp { grid-column: span 6; }    /* hospital next to address */
+    .bl-auth .bl-addr { grid-column: span 6; }
+    .bl-auth .bl-bc { grid-column: span 6; }      /* barangay, city */
   }
 }
 
-@media (max-width: 480px) {
-  .bl-field-row {
+/* =====================================================
+   SMALLER WINDOWS
+   ===================================================== */
+@media (max-width: 1100px) {
+  .bl-auth .bl-card {
+    grid-template-columns: 1fr 1fr;
+  }
+  /* narrower panel: two columns of fields instead of three */
+  .bl-auth .bl-reg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bl-auth .bl-s12,
+  .bl-auth .bl-addr { grid-column: 1 / -1; }
+  .bl-auth .bl-s6,
+  .bl-auth .bl-s3 { grid-column: span 1; }
+  .bl-auth .bl-form-panel {
+    --auth-pad: 32px;
+  }
+}
+
+@media (max-width: 780px) {
+  .bl-auth .bl-card {
     grid-template-columns: 1fr;
-    gap: 0;
+    max-width: none;
+    min-height: 100svh;
+  }
+  .bl-auth .bl-hero {
+    padding: 34px 20px 30px;
+  }
+  .bl-auth .bl-form-panel {
+    --auth-pad: 24px;
+    padding-top: 64px;
+  }
+}
+
+@media (max-width: 520px) {
+  .bl-auth .bl-reg-grid {
+    grid-template-columns: 1fr;
+  }
+  .bl-auth .bl-s6,
+  .bl-auth .bl-s3 { grid-column: 1 / -1; }
+  .bl-auth .bl-name-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .bl-auth .bl-name-row .bl-field:nth-child(3) {
+    grid-column: 1 / -1;
   }
 }

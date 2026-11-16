@@ -1,6 +1,13 @@
 import { useState, useEffect } from "react";
 import api from "../api";
 import ConfirmDialog from "./ConfirmDialog";
+import SuccessPopup from "./SuccessPopup";
+import LocationPicker from "./LocationPicker";
+import FieldError from "./FieldError";
+import {
+  validate, hasErrors, required, optional, fullName, email as emailRule, password as passwordRule,
+  contact as contactRule, address as addressRule, lettersOnly, bankName, license, focusFirstError,
+} from "../validation";
 import "./dashboard.css";
 
 // "Edit Profile" screen shared by every portal (donor/requester member, blood bank, admin).
@@ -28,6 +35,9 @@ function ProfileSection({ userId, onSaved }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [popup, setPopup] = useState(null); // centered success pop-up: { title, message }
+  const [errors, setErrors] = useState({});    // inline messages for the details form
+  const [secErrors, setSecErrors] = useState({}); // inline messages for the sign-in form
 
   const load = async () => {
     try {
@@ -44,6 +54,8 @@ function ProfileSection({ userId, onSaved }) {
         bank_name: res.data.bank_name || "",
         license_number: res.data.license_number || "",
         operating_hours: res.data.operating_hours || "",
+        latitude: res.data.latitude ?? "",
+        longitude: res.data.longitude ?? "",
       });
       setSec((s) => ({ ...s, email: res.data.email || "" }));
     } catch (err) {
@@ -58,7 +70,11 @@ function ProfileSection({ userId, onSaved }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  const change = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+  const change = (e) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+    // the red message goes away as soon as the person edits that field
+    setErrors((p) => (p[e.target.name] ? { ...p, [e.target.name]: "" } : p));
+  };
 
   const isBank = data?.role === "blood_bank";
   const isMember = data?.role === "member";
@@ -71,13 +87,13 @@ function ProfileSection({ userId, onSaved }) {
       norm(form.license_number) !== norm(data.license_number));
   const needsConfirm = sensitiveChanged && data?.verified_status === "verified";
 
-  const save = async (payload, setBusy) => {
+  const save = async (payload, setBusy, popupInfo) => {
     setError("");
     setMessage("");
     setBusy(true);
     try {
       const res = await api.put(`/profile/${userId}`, { acting_user_id: userId, ...payload });
-      setMessage(res.data.message);
+      setPopup(popupInfo || { title: "Profile updated!", message: res.data.message || "Your changes were saved." });
       await load();
       if (onSaved) onSaved(res.data);
       return true;
@@ -105,12 +121,32 @@ function ProfileSection({ userId, onSaved }) {
       p.bank_name = form.bank_name;
       p.license_number = form.license_number;
       p.operating_hours = form.operating_hours;
+      p.latitude = form.latitude === "" ? null : form.latitude;
+      p.longitude = form.longitude === "" ? null : form.longitude;
     }
     return p;
   };
 
+  const detailsRules = () => ({
+    full_name: [required("Full name"), fullName("Full name")],
+    contact_number: [required("Contact number"), contactRule],
+    address: [optional(addressRule("Address"))],
+    barangay: [optional(lettersOnly("Barangay"))],
+    city: [optional(lettersOnly("City"))],
+    ...(isMember ? { affiliated_hospital: [optional(lettersOnly("Affiliated hospital"))] } : {}),
+    ...(isBank
+      ? { bank_name: [required("Blood bank name"), bankName], license_number: [optional(license)] }
+      : {}),
+  });
+
   const handleDetailsSubmit = (e) => {
     e.preventDefault();
+    const found = validate(form, detailsRules());
+    setErrors(found);
+    if (hasErrors(found)) {
+      focusFirstError(e.currentTarget);
+      return;
+    }
     if (needsConfirm) {
       setConfirmOpen(true);
       return;
@@ -126,18 +162,31 @@ function ProfileSection({ userId, onSaved }) {
   const handleSecuritySubmit = async (e) => {
     e.preventDefault();
     const emailChanged = norm(sec.email).toLowerCase() !== norm(data.email).toLowerCase();
-    if (!emailChanged && !sec.new_password) {
-      setError("Nothing to update. Change your email or enter a new password.");
-      setMessage("");
+    const needsCurrent = emailChanged || !!sec.new_password;
+    const found = validate(sec, {
+      email: [required("Email"), emailRule],
+      new_password: [optional(passwordRule)],
+      current_password: [(v) => (needsCurrent && !String(v ?? "").trim() ? "Current password is required to confirm it's you." : "")],
+    });
+    // nothing was changed: say so right under the email field
+    if (!found.email && !found.new_password && !emailChanged && !sec.new_password) {
+      found.email = "Nothing to update. Change your email or enter a new password.";
+    }
+    setSecErrors(found);
+    if (hasErrors(found)) {
+      focusFirstError(e.currentTarget);
       return;
     }
+    // say exactly what changed: email, password or both
+    const changed = emailChanged && sec.new_password ? "Email and password" : sec.new_password ? "Password" : "Email";
     const ok = await save(
       {
         email: sec.email,
         current_password: sec.current_password,
         new_password: sec.new_password,
       },
-      setSavingSec
+      setSavingSec,
+      { title: `${changed} updated!`, message: "Your sign-in details were saved." }
     );
     if (ok) setSec((s) => ({ ...s, current_password: "", new_password: "" }));
   };
@@ -155,31 +204,36 @@ function ProfileSection({ userId, onSaved }) {
       {/* ---------- DETAILS ---------- */}
       <div className="db-card">
         <h3>Your details</h3>
-        <form onSubmit={handleDetailsSubmit} className="db-form">
+        <form onSubmit={handleDetailsSubmit} className="db-form" noValidate>
           <div className="db-field">
             <label>Full Name</label>
-            <input name="full_name" value={form.full_name} onChange={change} required />
+            <input name="full_name" value={form.full_name} onChange={change} aria-invalid={!!errors.full_name} aria-describedby="err-pf-name" />
+            <FieldError id="err-pf-name" message={errors.full_name} />
           </div>
 
           <div className="db-form-row">
             <div className="db-field">
               <label>Contact Number</label>
-              <input name="contact_number" value={form.contact_number} onChange={change} placeholder="09171234567" required />
+              <input name="contact_number" value={form.contact_number} onChange={change} placeholder="09171234567" aria-invalid={!!errors.contact_number} aria-describedby="err-pf-contact" />
+              <FieldError id="err-pf-contact" message={errors.contact_number} />
             </div>
             <div className="db-field">
               <label>Address</label>
-              <input name="address" value={form.address} onChange={change} />
+              <input name="address" value={form.address} onChange={change} aria-invalid={!!errors.address} aria-describedby="err-pf-addr" />
+              <FieldError id="err-pf-addr" message={errors.address} />
             </div>
           </div>
 
           <div className="db-form-row">
             <div className="db-field">
               <label>Barangay</label>
-              <input name="barangay" value={form.barangay} onChange={change} />
+              <input name="barangay" value={form.barangay} onChange={change} aria-invalid={!!errors.barangay} aria-describedby="err-pf-brgy" />
+              <FieldError id="err-pf-brgy" message={errors.barangay} />
             </div>
             <div className="db-field">
               <label>City</label>
-              <input name="city" value={form.city} onChange={change} />
+              <input name="city" value={form.city} onChange={change} aria-invalid={!!errors.city} aria-describedby="err-pf-city" />
+              <FieldError id="err-pf-city" message={errors.city} />
             </div>
           </div>
 
@@ -202,7 +256,8 @@ function ProfileSection({ userId, onSaved }) {
               </div>
               <div className="db-field">
                 <label>Affiliated Hospital (optional)</label>
-                <input name="affiliated_hospital" value={form.affiliated_hospital} onChange={change} />
+                <input name="affiliated_hospital" value={form.affiliated_hospital} onChange={change} aria-invalid={!!errors.affiliated_hospital} aria-describedby="err-pf-hosp" />
+                <FieldError id="err-pf-hosp" message={errors.affiliated_hospital} />
               </div>
             </>
           )}
@@ -222,17 +277,31 @@ function ProfileSection({ userId, onSaved }) {
               </p>
               <div className="db-field">
                 <label>Blood Bank Name</label>
-                <input name="bank_name" value={form.bank_name} onChange={change} required />
+                <input name="bank_name" value={form.bank_name} onChange={change} aria-invalid={!!errors.bank_name} aria-describedby="err-pf-bank" />
+                <FieldError id="err-pf-bank" message={errors.bank_name} />
               </div>
               <div className="db-form-row">
                 <div className="db-field">
                   <label>License Number</label>
-                  <input name="license_number" value={form.license_number} onChange={change} />
+                  <input name="license_number" value={form.license_number} onChange={change} aria-invalid={!!errors.license_number} aria-describedby="err-pf-lic" />
+                  <FieldError id="err-pf-lic" message={errors.license_number} />
                 </div>
                 <div className="db-field">
                   <label>Operating Hours</label>
                   <input name="operating_hours" value={form.operating_hours} onChange={change} placeholder="8:00 AM - 5:00 PM" />
                 </div>
+              </div>
+              <div className="db-field">
+                <label>Pin your blood bank on the map</label>
+                <LocationPicker
+                  latitude={form.latitude}
+                  longitude={form.longitude}
+                  onChange={(la, ln) => setForm((f) => ({ ...f, latitude: la, longitude: ln }))}
+                  onAddress={(a) => setForm((f) => (f.address ? f : { ...f, address: a }))}
+                />
+                <small className="db-subtext">
+                  Donors and admins see your bank at this pin. Moving the pin does not need re-verification.
+                </small>
               </div>
             </>
           )}
@@ -248,10 +317,11 @@ function ProfileSection({ userId, onSaved }) {
       {/* ---------- SIGN-IN & SECURITY (re-verification) ---------- */}
       <div className="db-card">
         <h3>Sign-in &amp; security</h3>
-        <form onSubmit={handleSecuritySubmit} className="db-form" autoComplete="off">
+        <form onSubmit={handleSecuritySubmit} className="db-form" autoComplete="off" noValidate>
           <div className="db-field">
             <label>Email</label>
-            <input type="email" value={sec.email} onChange={(e) => setSec({ ...sec, email: e.target.value })} required />
+            <input type="email" value={sec.email} onChange={(e) => { setSec({ ...sec, email: e.target.value }); setSecErrors((p) => ({ ...p, email: "" })); }} aria-invalid={!!secErrors.email} aria-describedby="err-pf-email" />
+            <FieldError id="err-pf-email" message={secErrors.email} />
           </div>
 
           <div className="db-field">
@@ -259,10 +329,13 @@ function ProfileSection({ userId, onSaved }) {
             <input
               type="password"
               value={sec.new_password}
-              onChange={(e) => setSec({ ...sec, new_password: e.target.value })}
+              onChange={(e) => { setSec({ ...sec, new_password: e.target.value }); setSecErrors((p) => ({ ...p, new_password: "" })); }}
               autoComplete="new-password"
+              aria-invalid={!!secErrors.new_password}
+              aria-describedby="err-pf-newpw"
             />
-            <small className="db-subtext">Min. 8 characters, at least 1 letter and 1 number.</small>
+            <FieldError id="err-pf-newpw" message={secErrors.new_password} />
+            {!secErrors.new_password && <small className="db-subtext">Min. 8 characters, at least 1 letter and 1 number.</small>}
           </div>
 
           {(emailChanged || sec.new_password) && (
@@ -271,10 +344,12 @@ function ProfileSection({ userId, onSaved }) {
               <input
                 type="password"
                 value={sec.current_password}
-                onChange={(e) => setSec({ ...sec, current_password: e.target.value })}
+                onChange={(e) => { setSec({ ...sec, current_password: e.target.value }); setSecErrors((p) => ({ ...p, current_password: "" })); }}
                 autoComplete="current-password"
-                required
+                aria-invalid={!!secErrors.current_password}
+                aria-describedby="err-pf-curpw"
               />
+              <FieldError id="err-pf-curpw" message={secErrors.current_password} />
             </div>
           )}
 
@@ -285,6 +360,8 @@ function ProfileSection({ userId, onSaved }) {
           </div>
         </form>
       </div>
+
+      <SuccessPopup open={!!popup} title={popup?.title} message={popup?.message} onClose={() => setPopup(null)} />
 
       <ConfirmDialog
         open={confirmOpen}

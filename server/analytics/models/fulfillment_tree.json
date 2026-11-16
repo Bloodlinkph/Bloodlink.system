@@ -1,0 +1,191 @@
+{
+  "name": "Blood Request Fulfillment Prediction",
+  "features": [
+    "compatible_donors",
+    "donors_within_10km",
+    "stock_sufficient"
+  ],
+  "algorithm": "Decision Tree (CART, Gini)",
+  "data_source": "synthetic",
+  "trained_at": "2026-11-16T11:23:05",
+  "max_depth": 3,
+  "min_samples_leaf": 60,
+  "target": "fulfilled within 24 hours (1) vs not (0)",
+  "metrics": {
+    "accuracy": 0.8,
+    "precision": 0.798,
+    "recall": 0.952,
+    "f1": 0.868,
+    "cv_accuracy_mean": 0.778,
+    "cv_accuracy_std": 0.027,
+    "confusion_matrix": {
+      "tn": 42,
+      "fp": 50,
+      "fn": 10,
+      "tp": 198
+    },
+    "risk_flag": {
+      "threshold": 0.7,
+      "failed": 92,
+      "caught": 56,
+      "missed": 36,
+      "false_alarms": 24,
+      "fine": 184,
+      "catch_rate": 0.609,
+      "flag_precision": 0.7
+    },
+    "train_rows": 1200,
+    "test_rows": 300,
+    "fulfilled_rate": 0.693
+  },
+  "feature_importance": [
+    {
+      "feature": "stock_sufficient",
+      "label": "Enough compatible stock",
+      "importance": 0.794
+    },
+    {
+      "feature": "compatible_donors",
+      "label": "Compatible donors",
+      "importance": 0.119
+    },
+    {
+      "feature": "donors_within_10km",
+      "label": "Donors within 10 km",
+      "importance": 0.087
+    }
+  ],
+  "rules_text": "|--- stock_sufficient <= 0.50\n|   |--- compatible_donors <= 6.50\n|   |   |--- class: 0\n|   |--- compatible_donors >  6.50\n|   |   |--- class: 0\n|--- stock_sufficient >  0.50\n|   |--- donors_within_10km <= 0.50\n|   |   |--- class: 1\n|   |--- donors_within_10km >  0.50\n|   |   |--- compatible_donors <= 7.50\n|   |   |   |--- class: 1\n|   |   |--- compatible_donors >  7.50\n|   |   |   |--- class: 1\n",
+  "plain_rules": [
+    {
+      "conditions": [
+        "compatible stock is not enough",
+        "Compatible donors: 0\u20136"
+      ],
+      "p_fulfilled": 0.098,
+      "band": "high_risk",
+      "samples": 92
+    },
+    {
+      "conditions": [
+        "compatible stock is not enough",
+        "Compatible donors: 7 or more"
+      ],
+      "p_fulfilled": 0.392,
+      "band": "high_risk",
+      "samples": 102
+    },
+    {
+      "conditions": [
+        "compatible stock is enough",
+        "Donors within 10 km: exactly 0"
+      ],
+      "p_fulfilled": 0.562,
+      "band": "at_risk",
+      "samples": 96
+    },
+    {
+      "conditions": [
+        "compatible stock is enough",
+        "Donors within 10 km: 1 or more",
+        "Compatible donors: 0\u20137"
+      ],
+      "p_fulfilled": 0.757,
+      "band": "likely",
+      "samples": 548
+    },
+    {
+      "conditions": [
+        "compatible stock is enough",
+        "Donors within 10 km: 1 or more",
+        "Compatible donors: 8 or more"
+      ],
+      "p_fulfilled": 0.865,
+      "band": "likely",
+      "samples": 362
+    }
+  ],
+  "tree": {
+    "id": 0,
+    "samples": 1200,
+    "p_fulfilled": 0.693,
+    "prediction": "Fulfilled 24 h",
+    "feature": "stock_sufficient",
+    "label": "Enough compatible stock",
+    "question": "Enough compatible stock?",
+    "threshold": 0.5,
+    "left_label": "No",
+    "right_label": "Yes",
+    "left": {
+      "id": 1,
+      "samples": 194,
+      "p_fulfilled": 0.253,
+      "prediction": "Not in 24 h",
+      "feature": "compatible_donors",
+      "label": "Compatible donors",
+      "question": "Compatible donors available?",
+      "threshold": 6.5,
+      "left_label": "\u2264 6",
+      "right_label": "\u2265 7",
+      "left": {
+        "id": 2,
+        "samples": 92,
+        "p_fulfilled": 0.098,
+        "prediction": "Not in 24 h",
+        "leaf": true
+      },
+      "right": {
+        "id": 3,
+        "samples": 102,
+        "p_fulfilled": 0.392,
+        "prediction": "Not in 24 h",
+        "leaf": true
+      }
+    },
+    "right": {
+      "id": 4,
+      "samples": 1006,
+      "p_fulfilled": 0.777,
+      "prediction": "Fulfilled 24 h",
+      "feature": "donors_within_10km",
+      "label": "Donors within 10 km",
+      "question": "Donors within 10 km?",
+      "threshold": 0.5,
+      "left_label": "\u2264 0",
+      "right_label": "\u2265 1",
+      "left": {
+        "id": 5,
+        "samples": 96,
+        "p_fulfilled": 0.562,
+        "prediction": "Fulfilled 24 h",
+        "leaf": true
+      },
+      "right": {
+        "id": 6,
+        "samples": 910,
+        "p_fulfilled": 0.8,
+        "prediction": "Fulfilled 24 h",
+        "feature": "compatible_donors",
+        "label": "Compatible donors",
+        "question": "Compatible donors available?",
+        "threshold": 7.5,
+        "left_label": "\u2264 7",
+        "right_label": "\u2265 8",
+        "left": {
+          "id": 7,
+          "samples": 548,
+          "p_fulfilled": 0.757,
+          "prediction": "Fulfilled 24 h",
+          "leaf": true
+        },
+        "right": {
+          "id": 8,
+          "samples": 362,
+          "p_fulfilled": 0.865,
+          "prediction": "Fulfilled 24 h",
+          "leaf": true
+        }
+      }
+    }
+  }
+}

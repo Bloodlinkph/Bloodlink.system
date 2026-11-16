@@ -1,6 +1,8 @@
     import { useState } from "react";
     import api from "../api";
     import logo from "../assets/bloodlink-logo-light.png";
+    import FieldError from "./FieldError";
+    import { validate, hasErrors, required, password as passwordRule, focusFirstError } from "../validation";
     import "./Login.css";
 
     // Opened from the link in the reset email (App.jsx passes the token from ?reset=...).
@@ -8,15 +10,27 @@
     const [password, setPassword] = useState("");
     const [confirm, setConfirm] = useState("");
     const [showPassword, setShowPassword] = useState(false);
-    const [error, setError] = useState("");
+    const [error, setError] = useState(""); // server problems only (e.g. expired link)
+    const [errors, setErrors] = useState({});
     const [success, setSuccess] = useState("");
     const [loading, setLoading] = useState(false);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError("");
-        if (password !== confirm) {
-        setError("The two passwords don't match.");
+        const found = validate(
+        { password, confirm },
+        {
+            password: [required("New password"), passwordRule],
+            confirm: [
+            required("Confirm password"),
+            (v, all) => (v !== all.password ? "The two passwords don't match." : ""),
+            ],
+        }
+        );
+        setErrors(found);
+        if (hasErrors(found)) {
+        focusFirstError(e.currentTarget);
         return;
         }
         setLoading(true);
@@ -56,7 +70,7 @@
             {success ? (
                 <button type="button" className="bl-submit" onClick={onDone}>Go to sign in</button>
             ) : (
-                <form onSubmit={handleSubmit}>
+                <form onSubmit={handleSubmit} noValidate>
                 <div className="bl-field">
                     <label htmlFor="bl-new-pw">New password</label>
                     <div className="bl-input-wrap">
@@ -69,9 +83,10 @@
                         type={showPassword ? "text" : "password"}
                         className="bl-has-eye"
                         value={password}
-                        onChange={(e) => setPassword(e.target.value)}
+                        onChange={(e) => { setPassword(e.target.value); setErrors((p) => ({ ...p, password: "" })); }}
                         autoComplete="new-password"
-                        required
+                        aria-invalid={!!errors.password}
+                        aria-describedby="err-new-pw"
                     />
                     <button
                         type="button"
@@ -96,6 +111,7 @@
                         </svg>
                     </button>
                     </div>
+                    <FieldError id="err-new-pw" message={errors.password} />
                 </div>
 
                 <div className="bl-field">
@@ -109,11 +125,13 @@
                         id="bl-confirm-pw"
                         type={showPassword ? "text" : "password"}
                         value={confirm}
-                        onChange={(e) => setConfirm(e.target.value)}
+                        onChange={(e) => { setConfirm(e.target.value); setErrors((p) => ({ ...p, confirm: "" })); }}
                         autoComplete="new-password"
-                        required
+                        aria-invalid={!!errors.confirm}
+                        aria-describedby="err-confirm-pw"
                     />
                     </div>
+                    <FieldError id="err-confirm-pw" message={errors.confirm} />
                 </div>
 
                 <button type="submit" className="bl-submit" disabled={loading}>

@@ -5,6 +5,7 @@ import ProfileSection from "./ProfileSection";
 import Overview, { prettify } from "./Overview";
 import { UNIT_HINT, UNIT_ERROR, UNIT_ML, formatUnits, formatChange, unitLabel, isValidUnits } from "./units";
 import "./dashboard.css";
+import Loading from "./Loading";
 
 function BloodBankDashboard({ user, onLogout }) {
   const [active, setActive] = useState("overview");
@@ -177,7 +178,7 @@ function BloodBankDashboard({ user, onLogout }) {
   };
 
   if (loading) {
-    return <div className="db-loading"><p className="db-muted">Loading...</p></div>;
+    return <div className="db-loading"><p className="db-muted"><Loading label="Loading..." /></p></div>;
   }
 
   // sidebar items (titles only)
@@ -353,7 +354,7 @@ function BloodBankDashboard({ user, onLogout }) {
           {active === "audit" && (
             <div className="db-card">
               {auditLoading ? (
-                <p className="db-muted">Loading history...</p>
+                <p className="db-muted"><Loading label="Loading history..." /></p>
               ) : auditLog.length === 0 ? (
                 <p className="db-muted">No inventory changes recorded yet.</p>
               ) : (

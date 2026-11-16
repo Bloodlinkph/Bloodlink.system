@@ -110,3 +110,7 @@ websocket-client==1.9.1
 Werkzeug==3.1.8
 zope.event==6.2
 zope.interface==8.5
+scikit-learn
+pandas
+numpy
+joblib

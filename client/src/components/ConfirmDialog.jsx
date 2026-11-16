@@ -1,4 +1,4 @@
-    import { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
     import { createPortal } from "react-dom";
     import "./confirm.css";
 
@@ -68,7 +68,7 @@
     if (!open) return null;
 
     // rendered inside .db-page so the portal's accent colors still apply
-    const target = document.querySelector(".db-page") || document.body;
+    const target = document.querySelector(".db-page, .bbv9") || document.body; // SPRINT 2 FIX: also themed inside the bbv9 dashboards
 
     return createPortal(
         <div
@@ -93,12 +93,12 @@
             <p id="cf-message" className="cf-message">{message}</p>
             {children}
             <div className="cf-actions">
-            <button ref={cancelRef} type="button" className="db-btn-outline" onClick={onCancel}>
+            <button ref={cancelRef} type="button" className="cf-btn cf-cancel" onClick={onCancel}>
                 {cancelLabel}
             </button>
             <button
                 type="button"
-                className={danger ? "cf-confirm cf-confirm-danger" : "db-btn"}
+                className={`cf-btn cf-confirm ${danger ? "cf-confirm-danger" : "cf-confirm-primary"}`}
                 onClick={onConfirm}
             >
                 {confirmLabel}

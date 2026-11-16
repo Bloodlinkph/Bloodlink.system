@@ -1,46 +1,86 @@
 import { useState } from "react";
 import api from "../api";
-import logo from "../assets/bloodlink-logo-light.png";
+import logo from "../assets/BloodLink_Mark_Transparent.png";
+import FieldError from "./FieldError";
+import {
+  validate, hasErrors, required, optional, email as emailRule, password as passwordRule, contact as contactRule,
+  address as addressRule, lettersOnly, bloodType as bloodTypeRule, notFuture, maxAge, focusFirstError,
+} from "../validation";
 import "./Login.css";
 import "./Register.css";
 
 function Register({ onRegisterSuccess, switchToLogin, switchToLanding }) {
-  const [role, setRole] = useState("member");
+  // sign-up is for members only (one account = donor + requester)
+  const role = "member";
   const [formData, setFormData] = useState({
-    full_name: "",
+    first_name: "",
+    last_name: "",
+    middle_initial: "",
     email: "",
     password: "",
     contact_number: "",
+    date_of_birth: "",
     address: "",
     barangay: "",
     city: "",
-    // member fields (one account = donor + requester)
     blood_type: "",
     requester_type: "individual",
     affiliated_hospital: "",
-    // blood bank fields
-    bank_name: "",
-    license_number: "",
-    operating_hours: "",
   });
-  const [error, setError] = useState("");
+  const [error, setError] = useState(""); // only for server problems (e.g. email already registered)
+  const [errors, setErrors] = useState({}); // per-field messages
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
+  // today as YYYY-MM-DD (local time), so a future birthday can't be picked
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+
   const handleChange = (e) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    let { name, value } = e.target;
+    if (name === "middle_initial") value = value.replace(/[^A-Za-z\u00D1\u00F1]/g, "").slice(0, 1);
+    setFormData({ ...formData, [name]: value });
+    // the red message goes away as soon as the person edits that field
+    setErrors((p) => (p[name] ? { ...p, [name]: "" } : p));
+  };
+
+  const rules = {
+    first_name: [required("First name"), lettersOnly("First name")],
+    last_name: [required("Last name"), lettersOnly("Last name")],
+    email: [required("Email"), emailRule],
+    password: [required("Password"), passwordRule],
+    contact_number: [required("Contact number"), contactRule],
+    date_of_birth: [required("Birthday"), notFuture("Birthday"), maxAge(120, "Birthday")],
+    blood_type: [required("Blood type"), bloodTypeRule],
+    affiliated_hospital: [optional(lettersOnly("Hospital"))],
+    address: [optional(addressRule("Address"))],
+    barangay: [optional(lettersOnly("Barangay"))],
+    city: [optional(lettersOnly("City"))],
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
     setSuccess("");
+    const found = validate(formData, rules);
+    setErrors(found);
+    if (hasErrors(found)) {
+      focusFirstError(e.currentTarget);
+      return;
+    }
     setLoading(true);
     let registered = false;
 
     try {
-      const payload = { ...formData, role };
+      // the server stores one full name: "First M Last" (no period, the name rule allows letters only)
+      const { first_name, last_name, middle_initial, ...rest } = formData;
+      const full_name = [first_name.trim(), middle_initial.trim().toUpperCase(), last_name.trim()]
+        .filter(Boolean)
+        .join(" ");
+      const payload = { ...rest, full_name, role };
       const response = await api.post("/register", payload);
       registered = true;
       setSuccess("Account created! Redirecting you to log in...");
@@ -58,19 +98,26 @@ function Register({ onRegisterSuccess, switchToLogin, switchToLanding }) {
   };
 
   return (
-    <div className="bl-page">
+    <div className="bl-page bl-auth">
       <div className="bl-card">
 
         {/* LEFT HERO PANEL */}
         <div className="bl-hero">
-          <div className="bl-logo-card">
-            <img className="bl-logo-img" src={logo} alt="BloodLink" />
+          <div className="bl-brand">
+            <div className="bl-logo-card">
+              <img className="bl-logo-img" src={logo} alt="BloodLink blood-drop logo" />
+            </div>
+            <h2 className="bl-brand-name">BloodLink</h2>
+            <p className="bl-hero-tagline">Give blood. Give hope.</p>
           </div>
-          <div className="bl-hero-name">BloodLink</div>
+          <p className="bl-hero-description">
+            BloodLink connects voluntary donors, patients and licensed blood banks in one place,
+            so help reaches the people who need it, faster. Every drop shared is a life given back.
+          </p>
         </div>
 
         {/* RIGHT FORM PANEL */}
-        <div className="bl-form-panel">
+        <div className="bl-form-panel bl-wide">
           <button type="button" className="bl-back" onClick={switchToLanding}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M15 6l-6 6 6 6" />
@@ -90,58 +137,61 @@ function Register({ onRegisterSuccess, switchToLogin, switchToLanding }) {
           {success && <div className="bl-inline-success">{success}</div>}
 
           <div className="bl-form-scroll">
-            <form onSubmit={handleSubmit}>
+            <form onSubmit={handleSubmit} className="bl-reg-grid" noValidate>
 
-              {/* ROLE PICKER */}
-              <div className="bl-field">
-                <label>I am registering as:</label>
-                <div className="bl-input-wrap">
-                  <select
-                    className="bl-role-select"
-                    value={role}
-                    onChange={(e) => setRole(e.target.value)}
-                    style={{ paddingLeft: "14px" }}
-                  >
-                    <option value="member">Donor / Requester</option>
-                    <option value="blood_bank">Blood Bank</option>
-                    <option value="admin">Admin</option>
-                  </select>
+              {/* NAME: first, last, middle initial */}
+              <div className="bl-name-row bl-s12">
+                <div className="bl-field">
+                  <label htmlFor="rg-first">First name</label>
+                  <div className="bl-input-wrap">
+                    <input id="rg-first" name="first_name" value={formData.first_name} onChange={handleChange} aria-invalid={!!errors.first_name} aria-describedby="err-rg-first" autoComplete="given-name" style={{ paddingLeft: "14px" }} />
+                  </div>
+                  <FieldError id="err-rg-first" message={errors.first_name} />
+                </div>
+                <div className="bl-field">
+                  <label htmlFor="rg-last">Last name</label>
+                  <div className="bl-input-wrap">
+                    <input id="rg-last" name="last_name" value={formData.last_name} onChange={handleChange} aria-invalid={!!errors.last_name} aria-describedby="err-rg-last" autoComplete="family-name" style={{ paddingLeft: "14px" }} />
+                  </div>
+                  <FieldError id="err-rg-last" message={errors.last_name} />
+                </div>
+                <div className="bl-field">
+                  <label htmlFor="rg-mi">M.I.</label>
+                  <div className="bl-input-wrap">
+                    <input id="rg-mi" name="middle_initial" value={formData.middle_initial} onChange={handleChange} maxLength={1} placeholder="A" aria-label="Middle initial" style={{ paddingLeft: "14px", textTransform: "uppercase" }} />
+                  </div>
                 </div>
               </div>
 
-              {/* COMMON FIELDS */}
-              <div className="bl-field">
-                <label>Full Name</label>
-                <div className="bl-input-wrap">
-                  <input name="full_name" value={formData.full_name} onChange={handleChange} required style={{ paddingLeft: "14px" }} />
-                </div>
-              </div>
-
-              <div className="bl-field">
-                <label>Email</label>
+              <div className="bl-field bl-s6">
+                <label htmlFor="rg-email">Email</label>
                 <div className="bl-input-wrap">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                     <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
                     <path d="M3.5 6.5L12 13L20.5 6.5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  <input type="email" name="email" value={formData.email} onChange={handleChange} required />
+                  <input id="rg-email" type="email" name="email" value={formData.email} onChange={handleChange} aria-invalid={!!errors.email} aria-describedby="err-rg-email" autoComplete="email" />
                 </div>
+                <FieldError id="err-rg-email" message={errors.email} />
               </div>
 
-              <div className="bl-field">
-                <label>Password</label>
+              <div className="bl-field bl-s6">
+                <label htmlFor="rg-pass">Password</label>
                 <div className="bl-input-wrap">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                     <rect x="4.5" y="10.5" width="15" height="10" rx="2.2" />
                     <path d="M8 10.5V7.5C8 5.29 9.79 3.5 12 3.5C14.21 3.5 16 5.29 16 7.5V10.5" strokeLinecap="round" />
                   </svg>
                   <input
+                    id="rg-pass"
                     type={showPassword ? "text" : "password"}
                     className="bl-has-eye"
                     name="password"
                     value={formData.password}
                     onChange={handleChange}
-                    required
+                    aria-invalid={!!errors.password}
+                    aria-describedby="err-rg-pass"
+                    autoComplete="new-password"
                   />
                   <button
                     type="button"
@@ -166,116 +216,84 @@ function Register({ onRegisterSuccess, switchToLogin, switchToLanding }) {
                     </svg>
                   </button>
                 </div>
-                <small style={{ display: "block", marginTop: "5px", fontSize: "11.5px", color: "#9a9aa2" }}>
-                  Min. 8 characters, at least 1 letter and 1 number.
-                </small>
+                <FieldError id="err-rg-pass" message={errors.password} />
+                {!errors.password && <small className="bl-hint">Min. 8 characters, at least 1 letter and 1 number.</small>}
               </div>
 
-              <div className="bl-field">
-                <label>Contact Number</label>
+              <div className="bl-field bl-s3 bl-t3">
+                <label htmlFor="rg-contact">Contact number</label>
                 <div className="bl-input-wrap">
-                  <input name="contact_number" value={formData.contact_number} onChange={handleChange} required placeholder="09171234567" style={{ paddingLeft: "14px" }} />
+                  <input id="rg-contact" name="contact_number" value={formData.contact_number} onChange={handleChange} aria-invalid={!!errors.contact_number} aria-describedby="err-rg-contact" placeholder="09171234567" inputMode="tel" style={{ paddingLeft: "14px" }} />
                 </div>
+                <FieldError id="err-rg-contact" message={errors.contact_number} />
               </div>
 
-              <div className="bl-field">
-                <label>Address</label>
+              <div className="bl-field bl-s3 bl-t3">
+                <label htmlFor="rg-dob">Birthday</label>
                 <div className="bl-input-wrap">
-                  <input name="address" value={formData.address} onChange={handleChange} style={{ paddingLeft: "14px" }} />
+                  <input id="rg-dob" type="date" name="date_of_birth" value={formData.date_of_birth} onChange={handleChange} aria-invalid={!!errors.date_of_birth} aria-describedby="err-rg-dob" max={todayStr} autoComplete="bday" style={{ paddingLeft: "14px" }} />
+                </div>
+                <FieldError id="err-rg-dob" message={errors.date_of_birth} />
+              </div>
+
+              <div className="bl-field bl-s3 bl-t3">
+                <label htmlFor="rg-bt">Blood type</label>
+                <div className="bl-input-wrap">
+                  <select id="rg-bt" className="bl-role-select" name="blood_type" value={formData.blood_type} onChange={handleChange} aria-invalid={!!errors.blood_type} aria-describedby="err-rg-bt" style={{ paddingLeft: "14px" }}>
+                    <option value="">Select blood type</option>
+                    <option>A+</option><option>A-</option>
+                    <option>B+</option><option>B-</option>
+                    <option>O+</option><option>O-</option>
+                    <option>AB+</option><option>AB-</option>
+                  </select>
+                </div>
+                <FieldError id="err-rg-bt" message={errors.blood_type} />
+              </div>
+
+              <div className="bl-field bl-s3 bl-hosp">
+                <label htmlFor="rg-rt">When requesting, I am a</label>
+                <div className="bl-input-wrap">
+                  <select id="rg-rt" className="bl-role-select" name="requester_type" value={formData.requester_type} onChange={handleChange} style={{ paddingLeft: "14px" }}>
+                    <option value="individual">Individual / Patient</option>
+                    <option value="hospital">Hospital</option>
+                    <option value="family_member">Family Member</option>
+                  </select>
                 </div>
               </div>
 
-              <div className="bl-field-row">
-                <div className="bl-field">
-                  <label>Barangay</label>
-                  <div className="bl-input-wrap">
-                    <input name="barangay" value={formData.barangay} onChange={handleChange} style={{ paddingLeft: "14px" }} />
-                  </div>
+              <div className="bl-field bl-s3 bl-hosp">
+                <label htmlFor="rg-hosp">Hospital (optional)</label>
+                <div className="bl-input-wrap">
+                  <input id="rg-hosp" name="affiliated_hospital" value={formData.affiliated_hospital} onChange={handleChange} aria-invalid={!!errors.affiliated_hospital} aria-describedby="err-rg-hosp" style={{ paddingLeft: "14px" }} />
                 </div>
-
-                <div className="bl-field">
-                  <label>City</label>
-                  <div className="bl-input-wrap">
-                    <input name="city" value={formData.city} onChange={handleChange} style={{ paddingLeft: "14px" }} />
-                  </div>
-                </div>
+                <FieldError id="err-rg-hosp" message={errors.affiliated_hospital} />
               </div>
 
-              {/* MEMBER FIELDS (donor + requester in one account) */}
-              {role === "member" && (
-                <>
-                  <div className="bl-section-label">Your details</div>
-                  <div className="bl-field">
-                    <label>Blood Type</label>
-                    <div className="bl-input-wrap">
-                      <select
-                        className="bl-role-select"
-                        name="blood_type"
-                        value={formData.blood_type}
-                        onChange={handleChange}
-                        required
-                        style={{ paddingLeft: "14px" }}
-                      >
-                        <option value="">Select blood type</option>
-                        <option>A+</option><option>A-</option>
-                        <option>B+</option><option>B-</option>
-                        <option>O+</option><option>O-</option>
-                        <option>AB+</option><option>AB-</option>
-                      </select>
-                    </div>
-                    <small>One account lets you both donate and request blood.</small>
-                  </div>
-                  <div className="bl-field">
-                    <label>When requesting, I am a</label>
-                    <div className="bl-input-wrap">
-                      <select
-                        className="bl-role-select"
-                        name="requester_type"
-                        value={formData.requester_type}
-                        onChange={handleChange}
-                        style={{ paddingLeft: "14px" }}
-                      >
-                        <option value="individual">Individual / Patient</option>
-                        <option value="hospital">Hospital</option>
-                        <option value="family_member">Family Member</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="bl-field">
-                    <label>Affiliated Hospital (optional)</label>
-                    <div className="bl-input-wrap">
-                      <input name="affiliated_hospital" value={formData.affiliated_hospital} onChange={handleChange} style={{ paddingLeft: "14px" }} />
-                    </div>
-                  </div>
-                </>
-              )}
+              <div className="bl-field bl-s12">
+                <label htmlFor="rg-addr">Address</label>
+                <div className="bl-input-wrap">
+                  <input id="rg-addr" name="address" value={formData.address} onChange={handleChange} aria-invalid={!!errors.address} aria-describedby="err-rg-addr" style={{ paddingLeft: "14px" }} />
+                </div>
+                <FieldError id="err-rg-addr" message={errors.address} />
+              </div>
 
-              {/* BLOOD BANK-ONLY FIELDS */}
-              {role === "blood_bank" && (
-                <>
-                  <div className="bl-section-label">Blood bank details</div>
-                  <div className="bl-field">
-                    <label>Blood Bank Name</label>
-                    <div className="bl-input-wrap">
-                      <input name="bank_name" value={formData.bank_name} onChange={handleChange} required style={{ paddingLeft: "14px" }} />
-                    </div>
-                  </div>
-                  <div className="bl-field">
-                    <label>License Number (optional)</label>
-                    <div className="bl-input-wrap">
-                      <input name="license_number" value={formData.license_number} onChange={handleChange} style={{ paddingLeft: "14px" }} />
-                    </div>
-                  </div>
-                  <div className="bl-field">
-                    <label>Operating Hours (optional)</label>
-                    <div className="bl-input-wrap">
-                      <input name="operating_hours" value={formData.operating_hours} onChange={handleChange} placeholder="8:00 AM - 5:00 PM" style={{ paddingLeft: "14px" }} />
-                    </div>
-                  </div>
-                </>
-              )}
+              <div className="bl-field bl-s3 bl-bc">
+                <label htmlFor="rg-brgy">Barangay</label>
+                <div className="bl-input-wrap">
+                  <input id="rg-brgy" name="barangay" value={formData.barangay} onChange={handleChange} aria-invalid={!!errors.barangay} aria-describedby="err-rg-brgy" style={{ paddingLeft: "14px" }} />
+                </div>
+                <FieldError id="err-rg-brgy" message={errors.barangay} />
+              </div>
 
-              <button type="submit" className="bl-submit" disabled={loading} style={{ marginTop: "8px" }}>
+              <div className="bl-field bl-s3 bl-bc">
+                <label htmlFor="rg-city">City</label>
+                <div className="bl-input-wrap">
+                  <input id="rg-city" name="city" value={formData.city} onChange={handleChange} aria-invalid={!!errors.city} aria-describedby="err-rg-city" style={{ paddingLeft: "14px" }} />
+                </div>
+                <FieldError id="err-rg-city" message={errors.city} />
+              </div>
+
+              <button type="submit" className="bl-submit bl-s12" disabled={loading}>
                 {loading ? "Creating account..." : "Sign Up"}
               </button>
             </form>

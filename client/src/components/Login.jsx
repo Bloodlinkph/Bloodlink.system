@@ -1,6 +1,8 @@
 import { useState } from "react";
 import api from "../api";
 import logo from "../assets/BloodLink_Mark_Transparent.png";
+import FieldError from "./FieldError";
+import { validate, hasErrors, required, email as emailRule, focusFirstError } from "../validation";
 import "./Login.css";
 
 function Login({ onLoginSuccess, switchToRegister, switchToLanding }) {
@@ -8,27 +10,40 @@ function Login({ onLoginSuccess, switchToRegister, switchToLanding }) {
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
+  const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(false);
+
+  const rules = {
+    email: [required("Email"), emailRule],
+    password: [required("Password")],
+  };
+  // the red message goes away as soon as the person edits that field
+  const clearError = (key) => setErrors((p) => (p[key] ? { ...p, [key]: "" } : p));
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError("");
+    const found = validate({ email, password }, rules);
+    setErrors(found);
+    if (hasErrors(found)) {
+      focusFirstError(e.currentTarget);
+      return;
+    }
     setLoading(true);
 
     try {
-      const response = await api.post("/login", { email, password });
+      const response = await api.post("/login", { email: email.trim(), password });
       onLoginSuccess(response.data);
     } catch (err) {
+      // wrong email or password is shown under the password field, not in a banner
       const message = err.response?.data?.message || "Something went wrong. Please try again.";
-      setError(message);
+      setErrors({ password: message });
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="bl-page">
+    <div className="bl-page bl-auth">
       <div className="bl-card">
 
         {/* LEFT HERO PANEL */}
@@ -63,9 +78,7 @@ function Login({ onLoginSuccess, switchToRegister, switchToLanding }) {
           <h1 className="bl-heading">Welcome back</h1>
           <p className="bl-subheading">Sign in to your account</p>
 
-          {error && <div className="bl-error">{error}</div>}
-
-          <form onSubmit={handleSubmit}>
+          <form onSubmit={handleSubmit} noValidate>
             <div className="bl-field">
               <label htmlFor="bl-email">Email</label>
               <div className="bl-input-wrap">
@@ -78,10 +91,13 @@ function Login({ onLoginSuccess, switchToRegister, switchToLanding }) {
                   type="email"
                   placeholder="you@example.com"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
+                  onChange={(e) => { setEmail(e.target.value); clearError("email"); }}
+                  aria-invalid={!!errors.email}
+                  aria-describedby="err-login-email"
+                  autoComplete="email"
                 />
               </div>
+              <FieldError id="err-login-email" message={errors.email} />
             </div>
 
             <div className="bl-field">
@@ -97,8 +113,10 @@ function Login({ onLoginSuccess, switchToRegister, switchToLanding }) {
                   className="bl-has-eye"
                   placeholder="Enter your password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
+                  onChange={(e) => { setPassword(e.target.value); clearError("password"); }}
+                  aria-invalid={!!errors.password}
+                  aria-describedby="err-login-password"
+                  autoComplete="current-password"
                 />
                 <button
                   type="button"
@@ -123,6 +141,7 @@ function Login({ onLoginSuccess, switchToRegister, switchToLanding }) {
                   </svg>
                 </button>
               </div>
+              <FieldError id="err-login-password" message={errors.password} />
             </div>
 
             {/* NOTE: "Remember me" and "Forgot password?" do nothing yet. Remove them or wire them up before launch. */}

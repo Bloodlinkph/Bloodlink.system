@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import api from "../api";
 import "./notifications.css";
+import Loading from "./Loading";
+
+// SPRINT 2 FIX: emergency / critical messages stand out from normal notifications
+const isAlert = (m) => /emergency|critical/i.test(String(m || ""));
 
 // Fired after any component changes notification state, so the bell and the
 // Notifications screen refetch and stay in sync.
@@ -119,7 +123,7 @@ function NotificationBell({ userId, pollMs = 30000 }) {
 
           <div className="nb-list">
             {loading ? (
-              <p className="nb-empty">Loading...</p>
+              <p className="nb-empty"><Loading label="Loading..." /></p>
             ) : error ? (
               <p className="nb-empty nb-error-text">{error}</p>
             ) : notifications.length === 0 ? (
@@ -128,10 +132,10 @@ function NotificationBell({ userId, pollMs = 30000 }) {
               notifications.map((n) => (
                 <div
                   key={n.notification_id}
-                  className={`nb-item ${n.read_status ? "" : "nb-item-unread"}`}
+                  className={`nb-item ${n.read_status ? "" : "nb-item-unread"} ${isAlert(n.message) ? "nb-emergency" : ""}`}
                   onClick={() => !n.read_status && markRead(n.notification_id)}
                 >
-                  <p className="nb-message">{n.message}</p>
+                  <p className="nb-message">{isAlert(n.message) && <span className="alert-tag">ALERT</span>}{n.message}</p>
                   <span className="nb-date">{n.date_sent}</span>
                 </div>
               ))
@@ -184,7 +188,7 @@ export function NotificationsSection({ userId, limit = 50, pollMs = 30000 }) {
       </div>
 
       {loading ? (
-        <p className="db-muted db-empty">Loading notifications...</p>
+        <p className="db-muted db-empty"><Loading label="Loading notifications..." /></p>
       ) : error ? (
         <p className="db-muted db-empty db-notif-error">{error}</p>
       ) : filtered.length === 0 ? (
@@ -199,7 +203,7 @@ export function NotificationsSection({ userId, limit = 50, pollMs = 30000 }) {
               return (
                 <li
                   key={n.notification_id}
-                  className={`db-notif-item ${unread ? "db-notif-item-unread" : ""}`}
+                  className={`db-notif-item ${unread ? "db-notif-item-unread" : ""} ${isAlert(n.message) ? "db-notif-emergency" : ""}`}
                   onClick={() => unread && markRead(n.notification_id)}
                   onKeyDown={(e) => {
                     if (unread && (e.key === "Enter" || e.key === " ")) {
@@ -211,7 +215,7 @@ export function NotificationsSection({ userId, limit = 50, pollMs = 30000 }) {
                   title={unread ? "Click to mark as read" : undefined}
                 >
                   <div className="db-notif-body">
-                    <p className="db-notif-message">{n.message}</p>
+                    <p className="db-notif-message">{isAlert(n.message) && <span className="alert-tag">ALERT</span>}{n.message}</p>
                     <span className="db-notif-date">{n.date_sent}</span>
                   </div>
                   {unread && <span className="db-notif-new">New</span>}

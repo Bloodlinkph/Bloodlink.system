@@ -267,6 +267,78 @@ def notify_critical_reviewers(curr, message, request_id):
         send_notification(curr, uid, message[:250], "in_app", request_id)
 
 
+# =====================================================================
+# STOCK MINIMUMS BASED ON BLOOD-TYPE RARITY
+#   Share of the Philippine population with each blood type (%).
+#   Source: "Blood type distribution by country" (Wikipedia, Philippines row);
+#   matches DOH/NVBSP: O most common, then B and A, AB rarest; Rh-negative < 1%.
+#   Common types are used more, so they need a bigger reserve. Rare types
+#   still keep a small floor so there is something on the shelf for an emergency.
+#   A blood bank can override any group's minimum from its Inventory page.
+# =====================================================================
+BLOOD_TYPE_FREQUENCY = {
+    "O+": 45.9, "B+": 24.9, "A+": 22.9, "AB+": 5.97,
+    "O-": 0.1, "A-": 0.1, "B-": 0.1, "AB-": 0.03,
+}
+STOCK_BASE_POOL = 60       # total units a typical bank should hold, split by frequency
+RARE_TYPE_FLOOR = 2        # never default a minimum below this
+UNIVERSAL_DONOR_FLOOR = 4  # O- is given to anyone in an emergency, so keep a few more
+
+
+def default_min_units(blood_type):
+    pct = BLOOD_TYPE_FREQUENCY.get(blood_type, 0)
+    floor = UNIVERSAL_DONOR_FLOOR if blood_type == "O-" else RARE_TYPE_FLOOR
+    return max(floor, math.ceil(STOCK_BASE_POOL * pct / 100))
+
+
+# =====================================================================
+# HOW MANY DONORS A REQUEST CAN TAKE
+#   1 donor gives 1 unit, so a request for 1.5 units needs 2 donors.
+#   The requester may ask a few donors per unit at once (backups),
+#   but only the first ones to accept fill the request; the rest expire.
+# =====================================================================
+MAX_ASKS_PER_UNIT = 3
+
+
+def donors_needed(quantity_needed):
+    return max(1, math.ceil(float(quantity_needed or 0)))
+
+
+def match_capacity(curr, request_id):
+    """(donors_needed, filled = accepted+confirmed, waiting = proposed). Caller should hold the request row lock."""
+    curr.execute("SELECT quantity_needed FROM BloodRequests WHERE request_id = ?", (request_id,))
+    row = curr.fetchone()
+    needed = donors_needed(row[0]) if row else 1
+    curr.execute("""
+        SELECT SUM(match_status IN ('accepted', 'confirmed')), SUM(match_status = 'proposed')
+        FROM Matches WHERE request_id = ?
+    """, (request_id,))
+    filled, waiting = curr.fetchone()
+    return needed, int(filled or 0), int(waiting or 0)
+
+
+def expire_extra_matches(curr, request_id):
+    """Once enough donors accepted, every donor still waiting is released and told why. Caller commits."""
+    needed, filled, waiting = match_capacity(curr, request_id)
+    if filled < needed or not waiting:
+        return 0
+    curr.execute("""
+        SELECT m.match_id, d.user_id FROM Matches m JOIN Donors d ON m.donor_id = d.donor_id
+        WHERE m.request_id = ? AND m.match_status = 'proposed'
+    """, (request_id,))
+    rows = curr.fetchall()
+    for _match_id, donor_user_id in rows:
+        send_notification(curr, donor_user_id,
+                          "Thank you for answering! Another donor already covered this request, so you don't need "
+                          "to go. You can still donate at a verified blood bank: book an appointment from your dashboard.",
+                          "in_app", request_id)
+    curr.execute("""
+        UPDATE Matches SET match_status = 'expired', responded_at = ?
+        WHERE request_id = ? AND match_status = 'proposed'
+    """, (datetime.now(), request_id))
+    return len(rows)
+
+
 def sync_request_status(curr, request_id):
     """pending <-> matched follows the donor matches (matched while a donor has accepted or confirmed).
        fulfilled / cancelled requests are never touched. Caller commits."""
@@ -407,6 +479,11 @@ def validate_bloodbank_extra(params):
     if license_number is not None and str(license_number).strip() != "":
         if not re.fullmatch(r"^[A-Za-z0-9-]+$", str(license_number).strip()):
             return "License Number must contain letters, numbers, and dash only."
+
+    # SPRINT 2 FIX: a blood bank can be pinned on the map (optional)
+    err = validate_coordinates(params)
+    if err:
+        return err
 
     return None
 
@@ -622,9 +699,10 @@ def ALLOW_REQUEST_LIST(u, kw):
 def ALLOW_REQUEST_STATUS(u, kw):
     if u["role"] in ("admin", "blood_bank"):
         return True
-    # the person who posted a request may only cancel it (fulfilled / matched are set by staff)
+    # the person who posted a request may cancel it, or mark it fulfilled once a donor accepted
+    # (the server re-checks that a donor really accepted, see update_request_status)
     status = str(_body().get("status", "")).strip()
-    return status == "cancelled" and _owns_request(u, kw["request_id"])
+    return status in ("cancelled", "fulfilled") and _owns_request(u, kw["request_id"])
 
 
 def ALLOW_MATCH_LIST(u, kw):
@@ -632,7 +710,9 @@ def ALLOW_MATCH_LIST(u, kw):
         return True
     donor_id = request.args.get("donor_id")
     request_id = request.args.get("request_id")
-    return bool((donor_id and _owns_donor(u, donor_id)) or (request_id and _owns_request(u, request_id)))
+    requester_id = request.args.get("requester_id")
+    return bool((donor_id and _owns_donor(u, donor_id)) or (request_id and _owns_request(u, request_id))
+                or (requester_id and _owns_requester(u, requester_id)))
 
 
 def ALLOW_MATCH_NEW(u, kw):
@@ -736,6 +816,18 @@ def register():
         if error:
             return jsonify({"message": error}), 400
 
+        # birthday is asked once, here, so age is never typed again in the screening
+        dob = None
+        if role == "member":
+            dob_raw = params.get("date_of_birth")
+            if dob_raw in (None, ""):
+                return jsonify({"message": "Date of birth is required."}), 400
+            dob = to_date(dob_raw)
+            if dob is None:
+                return jsonify({"message": "Date of birth must use YYYY-MM-DD format."}), 400
+            if dob > date.today() or calc_age(dob) > 120:
+                return jsonify({"message": "Date of birth is not valid."}), 400
+
         conn = db_connect()
         curr = conn.cursor()
 
@@ -744,9 +836,9 @@ def register():
         curr.execute("""
             INSERT INTO Users (
                 full_name, email, password_hash, contact_number,
-                address, barangay, city, role, account_status
+                address, barangay, city, date_of_birth, role, account_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         """, (
             params["full_name"].strip(),
             params["email"].strip(),
@@ -755,6 +847,7 @@ def register():
             params.get("address"),
             params.get("barangay"),
             params.get("city"),
+            dob,
             role
         ))
 
@@ -796,13 +889,15 @@ def register():
 
         elif role == "blood_bank":
             curr.execute("""
-                INSERT INTO BloodBanks (user_id, bank_name, license_number, operating_hours)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO BloodBanks (user_id, bank_name, license_number, operating_hours, latitude, longitude)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 user_id,
                 params["bank_name"].strip(),
                 params.get("license_number"),
-                params.get("operating_hours")
+                params.get("operating_hours"),
+                params.get("latitude") or None,
+                params.get("longitude") or None
             ))
 
         elif role == "admin":
@@ -838,6 +933,31 @@ def register():
 
 
 # =====================================================================
+# LOGIN HISTORY helpers
+# =====================================================================
+def _client_ip():
+    # Behind a reverse proxy (Caddy/Nginx) set BLOODLINK_TRUST_PROXY=1 to read the real IP.
+    if os.environ.get("BLOODLINK_TRUST_PROXY") == "1":
+        fwd = request.headers.get("X-Forwarded-For", "")
+        if fwd:
+            return fwd.split(",")[0].strip()[:45]
+    return (request.remote_addr or "")[:45]
+
+
+def record_login(curr, user_id, email, success, reason=None):
+    """Writes one LoginHistory row. Never lets a logging problem break the login itself."""
+    try:
+        curr.execute(
+            "INSERT INTO LoginHistory (user_id, email, success, reason, ip_address, user_agent) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, email[:150], 1 if success else 0, reason, _client_ip(),
+             (request.headers.get("User-Agent") or "")[:255])
+        )
+    except mariadb.Error as e:
+        _log_db_error(e)
+
+
+# =====================================================================
 # AUTH: LOGIN
 # =====================================================================
 @app.route("/login", methods=["POST"])
@@ -866,17 +986,23 @@ def login():
         row = curr.fetchone()
 
         if row is None or not check_password_hash(row[3], password):
+            record_login(curr, row[0] if row else None, email, False,
+                         "unknown_email" if row is None else "wrong_password")
+            conn.commit()
             curr.close()
             conn.close()
             return jsonify({"message": "Invalid email or password."}), 401
 
         if row[5] != "active":
+            record_login(curr, row[0], email, False, "account_disabled")
+            conn.commit()
             curr.close()
             conn.close()
             return jsonify({"message": "This account is disabled. Please contact an admin."}), 403
 
         curr.execute("UPDATE Users SET last_login = ? WHERE user_id = ?",
                      (datetime.now(), row[0]))
+        record_login(curr, row[0], email, True)
 
         notify_admins(
             curr,
@@ -918,7 +1044,8 @@ def get_donor_profile(user_id):
             SELECT d.donor_id, u.full_name, u.email, u.contact_number,
                    u.address, u.barangay, u.city,
                    bt.blood_type, d.latitude, d.longitude,
-                   d.availability_status, d.eligibility_status, d.last_donation_date
+                   d.availability_status, d.eligibility_status, d.last_donation_date,
+                   u.date_of_birth
             FROM Donors d
             JOIN Users u ON d.user_id = u.user_id
             JOIN BloodTypes bt ON d.blood_type_id = bt.blood_type_id
@@ -935,8 +1062,11 @@ def get_donor_profile(user_id):
         last = to_date(row[12])
         nxt = next_eligible_on(last)
         resting = in_rest_period(last)
+        dob = to_date(row[13])
 
         result = {
+            "date_of_birth": dob.isoformat() if dob else None,
+            "age": calc_age(dob) if dob else None,
             "donor_id": row[0], "full_name": row[1], "email": row[2], "contact_number": row[3],
             "address": row[4], "barangay": row[5], "city": row[6], "blood_type": row[7],
             "latitude": float(row[8]) if row[8] is not None else None,
@@ -1224,7 +1354,8 @@ def create_request():
         if urgency == "critical":
             urgency = "high"          # shown as high until a reviewer confirms it
 
-        reason = clean(params.get("critical_reason"), 255) if claim else None
+        # the web form sends "urgency_reason"; older clients sent "critical_reason". Accept both.
+        reason = clean(params.get("critical_reason") or params.get("urgency_reason"), 255) if claim else None
         hospital = clean(params.get("hospital_name"), 150)
         if claim:
             if not reason or len(reason) < CRITICAL_MIN_REASON:
@@ -1322,6 +1453,7 @@ def get_requests():
             SELECT r.request_id, u.full_name, bt.blood_type, r.quantity_needed,
                    r.urgency_level, r.status, r.location_needed, r.date_requested,
                    r.requester_id, r.critical_status, r.critical_reason,
+                   r.latitude, r.longitude, r.hospital_name, r.date_needed_by,
                    (SELECT m.match_status FROM Matches m
                      WHERE m.request_id = r.request_id
                        AND m.match_status IN ('proposed', 'accepted', 'confirmed')
@@ -1359,13 +1491,60 @@ def get_requests():
             "quantity_needed": float(r[3]), "urgency_level": r[4], "status": r[5],
             "location_needed": r[6], "date_requested": str(r[7]), "requester_id": r[8],
             "critical_status": r[9], "critical_reason": r[10],
-            "active_match": r[11], "declined_matches": int(r[12] or 0)
+            "latitude": float(r[11]) if r[11] is not None else None,
+            "longitude": float(r[12]) if r[12] is not None else None,
+            "hospital_name": r[13], "date_needed_by": str(r[14]) if r[14] else None,
+            "active_match": r[15], "declined_matches": int(r[16] or 0)
         } for r in rows]
 
         return jsonify(results), 200
 
     except mariadb.Error as e:
         return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+
+
+CRITICAL_ALERT_RADIUS_KM = 25     # donors within this distance of a confirmed-critical request are alerted
+CRITICAL_ALERT_MAX = 30           # never more than this many alerts per request
+
+
+def alert_nearby_donors(curr, request_id):
+    """SPRINT 2 FIX: when a request is CONFIRMED critical, tell compatible, available, eligible donors
+       who live close to it. In-app only. Uses the caller's cursor; the caller commits."""
+    curr.execute("""
+        SELECT bt.blood_type, r.latitude, r.longitude, req.user_id, r.quantity_needed
+        FROM BloodRequests r
+        JOIN BloodTypes bt ON r.blood_type_id = bt.blood_type_id
+        JOIN Requesters req ON r.requester_id = req.requester_id
+        WHERE r.request_id = ?
+    """, (request_id,))
+    row = curr.fetchone()
+    if row is None or row[1] is None or row[2] is None:
+        return 0
+    needed, rlat, rlon, owner_uid, qty = row
+    compatible = [bt for bt, targets in COMPATIBILITY.items() if needed in targets] or [needed]
+    ph = ",".join(["?"] * len(compatible))
+    curr.execute(f"""
+        SELECT d.user_id, d.latitude, d.longitude
+        FROM Donors d
+        JOIN Users u ON d.user_id = u.user_id
+        JOIN BloodTypes bt ON d.blood_type_id = bt.blood_type_id
+        WHERE bt.blood_type IN ({ph}) AND u.account_status = 'active'
+          AND d.availability_status = 'available' AND d.eligibility_status = 'eligible'
+          AND {REST_OK_SQL} AND d.user_id <> ?
+          AND d.latitude IS NOT NULL AND d.longitude IS NOT NULL
+    """, tuple(compatible) + (owner_uid,))
+    near = []
+    for uid, dlat, dlon in curr.fetchall():
+        km = haversine_km(float(rlat), float(rlon), float(dlat), float(dlon))
+        if km is not None and km <= CRITICAL_ALERT_RADIUS_KM:
+            near.append((km, uid))
+    near.sort()
+    for km, uid in near[:CRITICAL_ALERT_MAX]:
+        send_notification(curr, uid,
+                          f"EMERGENCY: {needed} blood ({unit_label(qty)}) is urgently needed about {round(km)} km from you. "
+                          f"Open your dashboard if you can help.", "in_app", request_id)
+    return min(len(near), CRITICAL_ALERT_MAX)
+
 
 
 # PHASE 3 (NEW): a verified blood bank or an admin confirms or rejects an emergency flag
@@ -1410,6 +1589,7 @@ def review_critical(request_id):
                 WHERE request_id = ?
             """, (g.user["uid"], request_id))
             note = f"Your emergency request #{request_id} was confirmed as critical."
+            alert_nearby_donors(curr, request_id)
         else:
             curr.execute("""
                 UPDATE BloodRequests
@@ -1473,6 +1653,16 @@ def update_request_status(request_id):
             conn.close()
             return jsonify({"message": "Blood request not found."}), 404
 
+        # SPRINT 2 FIX: a requester can only close a request as fulfilled after a donor accepted
+        if status == "fulfilled" and g.user["role"] not in ("admin", "blood_bank"):
+            curr.execute("""
+                SELECT COUNT(*) FROM Matches
+                WHERE request_id = ? AND match_status IN ('accepted', 'confirmed')
+            """, (request_id,))
+            if not curr.fetchone()[0]:
+                conn.rollback(); curr.close(); conn.close()
+                return jsonify({"message": "A request can only be marked fulfilled after a donor accepted it."}), 400
+
         # fulfilled / cancelled are final; they can't be reopened or changed
         if status != row[0] and status not in REQUEST_TRANSITIONS.get(row[0], set()):
             conn.rollback()
@@ -1481,6 +1671,10 @@ def update_request_status(request_id):
             return jsonify({"message": f"A {row[0]} request can't be changed to {status}."}), 409
 
         curr.execute("UPDATE BloodRequests SET status = ? WHERE request_id = ?", (status, request_id))
+
+        # analytics: remember WHEN it was fulfilled (used for the "fulfilled within 24 hours" target)
+        if status == "fulfilled" and row[0] != "fulfilled":
+            curr.execute("UPDATE BloodRequests SET fulfilled_at = ? WHERE request_id = ?", (datetime.now(), request_id))
 
         # cancelling a request also closes the donor matches that were still open
         if status == "cancelled" and row[0] != "cancelled":
@@ -1505,6 +1699,113 @@ def update_request_status(request_id):
 
     except mariadb.Error as e:
         return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+
+
+
+# SPRINT 2 FIX (NEW): the requester can edit an open request.
+# Blood type is locked (donors were matched on it); "critical" can't be self-set here (use the emergency flow).
+def ALLOW_REQUEST_EDIT(u, kw):
+    return _owns_request(u, kw["request_id"])
+
+
+@app.route("/requests/<int:request_id>/details", methods=["PUT"])
+@require_auth(allow=ALLOW_REQUEST_EDIT)
+def edit_request(request_id):
+    conn = None
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"message": "No data received."}), 400
+
+        conn = db_connect()
+        curr = conn.cursor()
+        curr.execute("""
+            SELECT status, urgency_level, critical_status, quantity_needed
+            FROM BloodRequests WHERE request_id = ? FOR UPDATE
+        """, (request_id,))
+        row = curr.fetchone()
+        if row is None:
+            return jsonify({"message": "Blood request not found."}), 404
+        if row[0] not in ("pending", "matched"):
+            conn.rollback()
+            return jsonify({"message": f"A {row[0]} request can't be edited."}), 409
+
+        sets, vals, changed = [], [], []
+
+        if "quantity_needed" in params:
+            qty = parse_units(str(params["quantity_needed"]).strip())
+            if qty is None:
+                return jsonify({"message": "Units needed " + UNIT_RULE_MSG}), 400
+            _needed, filled, _waiting = match_capacity(curr, request_id)
+            if donors_needed(qty) < filled:
+                return jsonify({"message": f"{filled} donor(s) already accepted this request, "
+                                           f"so it can't be lowered below {filled} unit(s)."}), 400
+            sets.append("quantity_needed = ?"); vals.append(qty)
+            if float(qty) != float(row[3]):
+                changed.append(f"units {fmt_units(row[3])} -> {fmt_units(qty)}")
+
+        if "urgency_level" in params:
+            urg = str(params["urgency_level"]).strip()
+            if urg not in ("low", "medium", "high", "critical"):
+                return jsonify({"message": "Urgency Level must be low, medium, high, or critical."}), 400
+            if urg == "critical" and row[2] != "confirmed":
+                return jsonify({"message": "Critical urgency must be confirmed by a blood bank or admin. "
+                                           "Post a new emergency request instead."}), 400
+            if row[2] == "confirmed" and urg != "critical":
+                return jsonify({"message": "This request was confirmed as critical and can't be lowered."}), 400
+            sets.append("urgency_level = ?"); vals.append(urg)
+
+        if "location_needed" in params:
+            loc = params.get("location_needed")
+            if loc is not None and str(loc).strip() != "" and not address_regex.fullmatch(str(loc).strip()):
+                return jsonify({"message": "Location Needed contains invalid characters."}), 400
+            sets.append("location_needed = ?"); vals.append(str(loc).strip() if loc else None)
+
+        if "latitude" in params or "longitude" in params:
+            err = validate_coordinates(params)
+            if err:
+                return jsonify({"message": err}), 400
+            sets += ["latitude = ?", "longitude = ?"]
+            vals += [params.get("latitude") or None, params.get("longitude") or None]
+            changed.append("location pin")
+
+        if "date_needed_by" in params:
+            d = params.get("date_needed_by")
+            if d and not date_regex.fullmatch(str(d).strip()):
+                return jsonify({"message": "Date Needed By must use YYYY-MM-DD (optionally HH:MM:SS) format."}), 400
+            sets.append("date_needed_by = ?"); vals.append(str(d).strip() if d else None)
+
+        if "hospital_name" in params:
+            h = str(params.get("hospital_name") or "").strip()[:150]
+            sets.append("hospital_name = ?"); vals.append(h or None)
+
+        if not sets:
+            return jsonify({"message": "Nothing to update."}), 400
+
+        curr.execute(f"UPDATE BloodRequests SET {', '.join(sets)} WHERE request_id = ?", tuple(vals) + (request_id,))
+        # fewer units now: donors still waiting may no longer be needed
+        expire_extra_matches(curr, request_id)
+
+        if changed:
+            curr.execute("""
+                SELECT d.user_id FROM Matches m JOIN Donors d ON m.donor_id = d.donor_id
+                WHERE m.request_id = ? AND m.match_status IN ('proposed', 'accepted')
+            """, (request_id,))
+            for (donor_user_id,) in curr.fetchall():
+                send_notification(curr, donor_user_id,
+                                  f"Request #{request_id} you were matched to was updated ({'; '.join(changed)}).",
+                                  "in_app", request_id)
+
+        curr.execute("INSERT INTO AuditLogs (user_id, action_performed, details) VALUES (?, ?, ?)",
+                     (g.user["uid"], "request_edit", f"Request {request_id} edited"))
+        conn.commit()
+        return jsonify({"message": "Request updated."}), 200
+
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 
 # =====================================================================
@@ -1542,7 +1843,8 @@ def find_donors(request_id):
         placeholders = ",".join(["?"] * len(compatible_types))
         curr.execute(f"""
             SELECT d.donor_id, u.full_name, u.contact_number, bt.blood_type,
-                   d.latitude, d.longitude, m.match_status
+                   d.latitude, d.longitude, m.match_status,
+                   u.barangay, u.city
             FROM Donors d
             JOIN Users u ON d.user_id = u.user_id
             JOIN BloodTypes bt ON d.blood_type_id = bt.blood_type_id
@@ -1566,7 +1868,10 @@ def find_donors(request_id):
                 donor_lat, donor_lon
             )
             status = r[6]
+            # barangay + city only; the street address stays private like the phone number
+            area = ", ".join(p.strip() for p in (r[7], r[8]) if p and str(p).strip())
             results.append({
+                "location": area or None,
                 "donor_id": r[0], "full_name": r[1],
                 # the phone number is only shared once the donor has said yes
                 "contact_number": r[2] if status in ("accepted", "confirmed") else None,
@@ -1594,6 +1899,7 @@ def get_matches():
     try:
         donor_id_filter = request.args.get("donor_id")
         request_id_filter = request.args.get("request_id")
+        requester_id_filter = request.args.get("requester_id")
 
         conn = db_connect()
         curr = conn.cursor()
@@ -1619,6 +1925,9 @@ def get_matches():
         if request_id_filter:
             conditions.append("m.request_id = ?")
             params_sql.append(request_id_filter)
+        if requester_id_filter:
+            conditions.append("br.requester_id = ?")
+            params_sql.append(requester_id_filter)
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
@@ -1677,16 +1986,29 @@ def create_match():
             return jsonify({"message": "You can't match with your own request."}), 400
 
         # PHASE 3: the request must still be open, and the donor must be free to donate right now
-        curr.execute("SELECT status FROM BloodRequests WHERE request_id = ?", (request_id,))
+        # (locked so two clicks at once can't both slip past the donor limit below)
+        curr.execute("SELECT status FROM BloodRequests WHERE request_id = ? FOR UPDATE", (request_id,))
         req_row = curr.fetchone()
         if req_row is None:
-            curr.close()
-            conn.close()
+            conn.rollback(); curr.close(); conn.close()
             return jsonify({"message": "Blood request not found."}), 404
         if req_row[0] not in ("pending", "matched"):
-            curr.close()
-            conn.close()
+            conn.rollback(); curr.close(); conn.close()
             return jsonify({"message": "This request is already closed."}), 400
+
+        # enough donors already said yes: asking more people would only waste their trip
+        needed, filled, waiting = match_capacity(curr, request_id)
+        if filled >= needed:
+            conn.rollback(); curr.close(); conn.close()
+            return jsonify({"message": f"This request already has {filled} donor(s) for "
+                                       f"{needed} needed. No more donors can be asked.",
+                            "needed": needed, "filled": filled, "waiting": waiting}), 409
+        max_open = needed * MAX_ASKS_PER_UNIT
+        if filled + waiting >= max_open:
+            conn.rollback(); curr.close(); conn.close()
+            return jsonify({"message": f"You can ask up to {max_open} donor(s) at a time for this request. "
+                                       "Wait for an answer, or withdraw a request first.",
+                            "needed": needed, "filled": filled, "waiting": waiting}), 409
 
         curr.execute(f"""
             SELECT 1 FROM Donors d
@@ -1776,7 +2098,24 @@ def update_match_status(match_id):
         # a decision can't be undone: declined / confirmed / expired are final
         if status not in MATCH_TRANSITIONS.get(row[0], set()):
             conn.rollback()
+            if row[0] == "expired":
+                return jsonify({"message": "This request no longer needs you: it was covered by other donors, "
+                                           "cancelled, or withdrawn. Thank you! You can still donate at a blood bank.",
+                                "match_status": "expired"}), 409
             return jsonify({"message": f"This match is already {row[0]} and can't be changed to {status}."}), 409
+
+        if status == "accepted":
+            # first come, first served: lock the request so two donors can't both take the last slot
+            curr.execute("SELECT status FROM BloodRequests WHERE request_id = ? FOR UPDATE", (row[1],))
+            req = curr.fetchone()
+            needed, filled, _waiting = match_capacity(curr, row[1])
+            if req is None or req[0] not in ("pending", "matched") or filled >= needed:
+                curr.execute("UPDATE Matches SET match_status = 'expired', responded_at = ? WHERE match_id = ?",
+                             (datetime.now(), match_id))
+                conn.commit()
+                return jsonify({"message": "Thank you! This request was already covered by other donors, so you "
+                                           "don't need to go. You can still donate at a verified blood bank.",
+                                "match_status": "expired"}), 409
 
         curr.execute("""
             UPDATE Matches SET match_status = ?, responded_at = ?
@@ -1785,6 +2124,10 @@ def update_match_status(match_id):
 
         # the request follows its matches: matched while a donor has accepted, pending again after a decline
         sync_request_status(curr, row[1])
+
+        # the last needed donor just said yes: release everyone else who is still waiting
+        if status == "accepted":
+            expire_extra_matches(curr, row[1])
 
         # Notify the requester when the donor responds to the match
         if status in ("accepted", "declined", "confirmed"):
@@ -1834,7 +2177,8 @@ def get_bloodbank_profile(user_id):
 
         curr.execute("""
             SELECT bb.blood_bank_id, u.full_name, u.email, u.contact_number,
-                   bb.bank_name, bb.license_number, bb.operating_hours, bb.verified_status
+                   bb.bank_name, bb.license_number, bb.operating_hours, bb.verified_status,
+                   bb.latitude, bb.longitude
             FROM BloodBanks bb
             JOIN Users u ON bb.user_id = u.user_id
             WHERE bb.user_id = ?
@@ -1849,7 +2193,9 @@ def get_bloodbank_profile(user_id):
         result = {
             "blood_bank_id": row[0], "full_name": row[1], "email": row[2],
             "contact_number": row[3], "bank_name": row[4], "license_number": row[5],
-            "operating_hours": row[6], "verified_status": row[7]
+            "operating_hours": row[6], "verified_status": row[7],
+            "latitude": float(row[8]) if row[8] is not None else None,
+            "longitude": float(row[9]) if row[9] is not None else None
         }
         return jsonify(result), 200
 
@@ -1867,7 +2213,7 @@ def get_inventory(blood_bank_id):
 
         curr.execute("""
             SELECT bt.blood_type_id, bt.blood_type,
-                   COALESCE(inv.units_available, 0), inv.last_updated
+                   COALESCE(inv.units_available, 0), inv.last_updated, inv.min_units
             FROM BloodTypes bt
             LEFT JOIN BloodBankInventory inv
                 ON bt.blood_type_id = inv.blood_type_id AND inv.blood_bank_id = ?
@@ -1877,10 +2223,18 @@ def get_inventory(blood_bank_id):
         curr.close()
         conn.close()
 
-        results = [{
-            "blood_type_id": r[0], "blood_type": r[1],
-            "units_available": float(r[2]), "last_updated": str(r[3]) if r[3] else None
-        } for r in rows]
+        results = []
+        for r in rows:
+            default_min = default_min_units(r[1])
+            results.append({
+                "blood_type_id": r[0], "blood_type": r[1],
+                "units_available": float(r[2]), "last_updated": str(r[3]) if r[3] else None,
+                # minimum stock for this group: the bank's own value, or the rarity-based default
+                "min_units": float(r[4]) if r[4] is not None else float(default_min),
+                "min_is_custom": r[4] is not None,
+                "default_min_units": float(default_min),
+                "population_pct": BLOOD_TYPE_FREQUENCY.get(r[1]),
+            })
 
         return jsonify(results), 200
 
@@ -1983,6 +2337,64 @@ def update_inventory(blood_bank_id):
             conn.close()
 
 
+@app.route("/bloodbanks/<int:blood_bank_id>/inventory/minimum", methods=["PUT"])
+@require_auth("blood_bank", "admin", allow=ALLOW_INVENTORY_WRITE)
+def update_inventory_minimum(blood_bank_id):
+    """Sets one blood group's minimum stock level for this bank.
+       Send min_units = null (or reset = true) to go back to the rarity-based default."""
+    conn = None
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"message": "No data received."}), 400
+
+        blood_type_id = params.get("blood_type_id")
+        changed_by = params.get("changed_by")
+        reset = bool(params.get("reset")) or params.get("min_units") in (None, "")
+        min_units = None if reset else parse_units(params.get("min_units"), allow_zero=True)
+
+        if not blood_type_id:
+            return jsonify({"message": "Blood Type ID is required."}), 400
+        if not reset and min_units is None:
+            return jsonify({"message": "Minimum " + UNIT_RULE_MSG}), 400
+
+        conn = db_connect()
+        curr = conn.cursor()
+
+        curr.execute("SELECT user_id, verified_status FROM BloodBanks WHERE blood_bank_id = ?", (blood_bank_id,))
+        bank = curr.fetchone()
+        if bank is None:
+            return jsonify({"message": "Blood bank not found."}), 404
+        if bank[1] != "verified":
+            return jsonify({"message": "Your blood bank must be verified by an admin before you can edit inventory."}), 403
+
+        curr.execute("SELECT blood_type FROM BloodTypes WHERE blood_type_id = ?", (blood_type_id,))
+        bt = curr.fetchone()
+        if bt is None:
+            return jsonify({"message": "Unknown blood type."}), 400
+
+        curr.execute("""
+            INSERT INTO BloodBankInventory (blood_bank_id, blood_type_id, units_available, min_units)
+            VALUES (?, ?, 0, ?)
+            ON DUPLICATE KEY UPDATE min_units = VALUES(min_units)
+        """, (blood_bank_id, blood_type_id, min_units))
+
+        effective = float(min_units) if min_units is not None else float(default_min_units(bt[0]))
+        curr.execute("INSERT INTO AuditLogs (user_id, action_performed, details) VALUES (?, ?, ?)",
+                     (g.user["uid"], "inventory_minimum_update",
+                      f"Bank {blood_bank_id}: {bt[0]} minimum set to "
+                      + (f"{fmt_units(min_units)}" if min_units is not None else f"default ({fmt_units(effective)})")))
+        conn.commit()
+        return jsonify({"message": "Minimum updated.", "min_units": effective,
+                        "min_is_custom": min_units is not None}), 200
+
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 # ---------------------------------------------------------------------
 # INVENTORY AUDIT LOG (read)
 # ---------------------------------------------------------------------
@@ -2043,6 +2455,139 @@ def get_admin_inventory_audit():
         return jsonify(fetch_inventory_audit(
             request.args.get("blood_bank_id"), request.args.get("limit", 100)
         )), 200
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+
+
+# =====================================================================
+# ADMIN: AUDIT LOGS  (reads the AuditLogs table)
+# =====================================================================
+@app.route("/admin/audit-logs", methods=["GET"])
+@require_auth("admin")
+def get_audit_logs():
+    try:
+        try:
+            limit = min(max(int(request.args.get("limit", 200)), 1), 1000)
+        except (TypeError, ValueError):
+            limit = 200
+
+        action = request.args.get("action", "").strip()
+        search = request.args.get("q", "").strip()
+
+        query = """
+            SELECT l.log_id, l.user_id, u.full_name, u.role,
+                   l.action_performed, l.details, l.timestamp
+            FROM AuditLogs l
+            LEFT JOIN Users u ON l.user_id = u.user_id
+        """
+        where, args = [], []
+        if action:
+            where.append("l.action_performed = ?")
+            args.append(action)
+        if search:
+            where.append("(l.details LIKE ? OR u.full_name LIKE ? OR l.action_performed LIKE ?)")
+            like = f"%{search}%"
+            args += [like, like, like]
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY l.timestamp DESC, l.log_id DESC LIMIT ?"
+        args.append(limit)
+
+        conn = db_connect()
+        try:
+            curr = conn.cursor()
+            curr.execute(query, tuple(args))
+            rows = curr.fetchall()
+            # every action that exists, for the filter dropdown
+            curr.execute("SELECT DISTINCT action_performed FROM AuditLogs ORDER BY action_performed")
+            actions = [r[0] for r in curr.fetchall()]
+            curr.close()
+        finally:
+            conn.close()
+
+        logs = [{
+            "log_id": r[0],
+            "user_id": r[1],
+            "user_name": r[2] or ("System" if r[1] is None else "Deleted user"),
+            "user_role": r[3],
+            "action_performed": r[4],
+            "details": r[5] or "",
+            "timestamp": str(r[6]),
+        } for r in rows]
+
+        return jsonify({"logs": logs, "actions": actions}), 200
+
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+
+
+# =====================================================================
+# ADMIN: LOGIN HISTORY  (reads the LoginHistory table)
+# =====================================================================
+@app.route("/admin/login-history", methods=["GET"])
+@require_auth("admin")
+def get_login_history():
+    try:
+        try:
+            limit = min(max(int(request.args.get("limit", 200)), 1), 1000)
+        except (TypeError, ValueError):
+            limit = 200
+
+        result = request.args.get("result", "").strip()   # "success", "failed" or "" (all)
+        search = request.args.get("q", "").strip()
+
+        query = """
+            SELECT h.login_id, h.user_id, u.full_name, u.role, h.email, h.success,
+                   h.reason, h.ip_address, h.user_agent, h.created_at
+            FROM LoginHistory h
+            LEFT JOIN Users u ON h.user_id = u.user_id
+        """
+        where, args = [], []
+        if result == "success":
+            where.append("h.success = 1")
+        elif result == "failed":
+            where.append("h.success = 0")
+        if search:
+            where.append("(h.email LIKE ? OR u.full_name LIKE ? OR h.ip_address LIKE ?)")
+            like = f"%{search}%"
+            args += [like, like, like]
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY h.created_at DESC, h.login_id DESC LIMIT ?"
+        args.append(limit)
+
+        conn = db_connect()
+        try:
+            curr = conn.cursor()
+            curr.execute(query, tuple(args))
+            rows = curr.fetchall()
+            curr.execute("""
+                SELECT COALESCE(SUM(success = 1), 0), COALESCE(SUM(success = 0), 0)
+                FROM LoginHistory WHERE created_at >= NOW() - INTERVAL 1 DAY
+            """)
+            s = curr.fetchone()
+            curr.close()
+        finally:
+            conn.close()
+
+        logins = [{
+            "login_id": r[0],
+            "user_id": r[1],
+            "full_name": r[2] or "",
+            "role": r[3],
+            "email": r[4],
+            "success": bool(r[5]),
+            "reason": r[6],
+            "ip_address": r[7] or "",
+            "user_agent": r[8] or "",
+            "created_at": str(r[9]),
+        } for r in rows]
+
+        return jsonify({
+            "logins": logins,
+            "summary": {"success_24h": int(s[0]), "failed_24h": int(s[1])},
+        }), 200
+
     except mariadb.Error as e:
         return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
 
@@ -2690,6 +3235,175 @@ def update_account_status(user_id):
         return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
 
 
+# ---------------------------------------------------------------------
+# ADMIN: add a user / edit a user
+#   POST /admin/users        create a member, blood bank or admin account
+#   PUT  /admin/users/<id>   edit details (role cannot change; optional password reset)
+# ---------------------------------------------------------------------
+@app.route("/admin/users", methods=["POST"])
+@require_auth("admin")
+def admin_create_user():
+    conn = None
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"message": "No data received."}), 400
+
+        error = validate_user_common(params, require_password=True)
+        if error:
+            return jsonify({"message": error}), 400
+
+        role = params["role"].strip()
+        if role == "member":
+            error = validate_donor_extra(params) or validate_requester_extra(params)
+        elif role == "blood_bank":
+            error = validate_bloodbank_extra(params)
+        elif role == "admin":
+            level = params.get("permission_level", "staff")
+            error = None if level in ("staff", "super_admin") else "Permission level must be staff or super_admin."
+        if error:
+            return jsonify({"message": error}), 400
+
+        conn = db_connect()
+        curr = conn.cursor()
+
+        curr.execute("""
+            INSERT INTO Users (full_name, email, password_hash, contact_number,
+                               address, barangay, city, role, account_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        """, (
+            params["full_name"].strip(), params["email"].strip(),
+            generate_password_hash(params["password"].strip()),
+            params["contact_number"].strip(),
+            _clean(params.get("address")), _clean(params.get("barangay")), _clean(params.get("city")),
+            role
+        ))
+        user_id = curr.lastrowid
+
+        if role == "member":
+            blood_type_id = get_blood_type_id(curr, params["blood_type"].strip().upper())
+            if blood_type_id is None:
+                conn.rollback()
+                return jsonify({"message": "Unknown Blood Type."}), 400
+            curr.execute("""
+                INSERT INTO Donors (user_id, blood_type_id, latitude, longitude, availability_status, last_donation_date)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, blood_type_id, params.get("latitude") or None, params.get("longitude") or None,
+                  params.get("availability_status", "available"), params.get("last_donation_date") or None))
+            curr.execute("""
+                INSERT INTO Requesters (user_id, requester_type, affiliated_hospital)
+                VALUES (?, ?, ?)
+            """, (user_id, params.get("requester_type", "individual"), _clean(params.get("affiliated_hospital"))))
+
+        elif role == "blood_bank":
+            curr.execute("""
+                INSERT INTO BloodBanks (user_id, bank_name, license_number, operating_hours, latitude, longitude)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, params["bank_name"].strip(), _clean(params.get("license_number")),
+                  _clean(params.get("operating_hours")),
+                  params.get("latitude") or None, params.get("longitude") or None))
+
+        elif role == "admin":
+            curr.execute("INSERT INTO Admins (user_id, permission_level) VALUES (?, ?)",
+                         (user_id, params.get("permission_level", "staff")))
+
+        curr.execute("""
+            INSERT INTO AuditLogs (user_id, action_performed, details)
+            VALUES (?, ?, ?)
+        """, (g.user["uid"], "admin_create_user",
+              f"Created {role} account #{user_id} ({params['email'].strip()})"[:500]))
+
+        conn.commit()
+        return jsonify({"message": "User created.", "user_id": user_id}), 201
+
+    except mariadb.IntegrityError as e:
+        return jsonify({"message": "That email is already in use.", "error": _log_db_error(e)}), 400
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/admin/users/<int:user_id>", methods=["PUT"])
+@require_auth("admin")
+def admin_update_user(user_id):
+    conn = None
+    try:
+        params = request.get_json()
+        if not params:
+            return jsonify({"message": "No data received."}), 400
+
+        conn = db_connect()
+        curr = conn.cursor()
+
+        current = load_profile(curr, user_id)
+        if current is None:
+            return jsonify({"message": "User not found."}), 404
+        role = current["role"]          # the role itself is never changed here
+
+        fields = list(COMMON_PROFILE_FIELDS)
+        if role == "member":
+            fields += ["requester_type", "affiliated_hospital"]
+        elif role == "blood_bank":
+            fields += ["bank_name", "license_number", "operating_hours", "latitude", "longitude"]
+        merged = {f: params[f] if f in params else current.get(f) for f in fields}
+        merged["role"] = role
+
+        error = validate_user_common(merged, require_password=False)
+        if not error and role == "member":
+            error = validate_requester_extra(merged)
+        if not error and role == "blood_bank":
+            error = validate_bloodbank_extra(merged)
+        if error:
+            return jsonify({"message": error}), 400
+
+        new_password = str(params.get("new_password") or "").strip()
+        if new_password and not password_regex.fullmatch(new_password):
+            return jsonify({"message": "New password must be at least 8 characters and include a letter and a number."}), 400
+
+        sets = "full_name = ?, email = ?, contact_number = ?, address = ?, barangay = ?, city = ?"
+        args = [merged["full_name"].strip(), merged["email"].strip(), merged["contact_number"].strip(),
+                _clean(merged["address"]), _clean(merged["barangay"]), _clean(merged["city"])]
+        if new_password:
+            sets += ", password_hash = ?"
+            args.append(generate_password_hash(new_password))
+        curr.execute(f"UPDATE Users SET {sets} WHERE user_id = ?", tuple(args) + (user_id,))
+
+        if role == "member":
+            curr.execute("SELECT 1 FROM Requesters WHERE user_id = ?", (user_id,))
+            if curr.fetchone():
+                curr.execute("UPDATE Requesters SET requester_type = ?, affiliated_hospital = ? WHERE user_id = ?",
+                             (merged["requester_type"], _clean(merged["affiliated_hospital"]), user_id))
+            else:
+                curr.execute("INSERT INTO Requesters (user_id, requester_type, affiliated_hospital) VALUES (?, ?, ?)",
+                             (user_id, merged["requester_type"], _clean(merged["affiliated_hospital"])))
+
+        elif role == "blood_bank" and current.get("blood_bank_id"):
+            curr.execute("""
+                UPDATE BloodBanks SET bank_name = ?, license_number = ?, operating_hours = ?,
+                                      latitude = ?, longitude = ?
+                WHERE user_id = ?
+            """, (merged["bank_name"].strip(), _clean(merged["license_number"]),
+                  _clean(merged["operating_hours"]),
+                  _clean(merged.get("latitude")), _clean(merged.get("longitude")), user_id))
+
+        details = "admin edited account details" + ("; password reset" if new_password else "")
+        curr.execute("INSERT INTO AuditLogs (user_id, action_performed, details) VALUES (?, ?, ?)",
+                     (user_id, "admin_update_user", details))
+
+        conn.commit()
+        return jsonify({"message": "User updated."}), 200
+
+    except mariadb.IntegrityError:
+        return jsonify({"message": "That email is already in use."}), 400
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.route("/admin/bloodbanks", methods=["GET"])
 @require_auth("admin")
 def get_bloodbanks_for_verification():
@@ -2700,7 +3414,8 @@ def get_bloodbanks_for_verification():
 
         curr.execute("""
             SELECT bb.blood_bank_id, bb.bank_name, u.email, u.contact_number,
-                   bb.license_number, bb.verified_status
+                   bb.license_number, bb.verified_status, bb.latitude, bb.longitude,
+                   u.address, bb.operating_hours
             FROM BloodBanks bb
             JOIN Users u ON bb.user_id = u.user_id
             ORDER BY bb.verified_status ASC, bb.blood_bank_id DESC
@@ -2711,7 +3426,10 @@ def get_bloodbanks_for_verification():
 
         results = [{
             "blood_bank_id": r[0], "bank_name": r[1], "email": r[2],
-            "contact_number": r[3], "license_number": r[4], "verified_status": r[5]
+            "contact_number": r[3], "license_number": r[4], "verified_status": r[5],
+            "latitude": float(r[6]) if r[6] is not None else None,
+            "longitude": float(r[7]) if r[7] is not None else None,
+            "address": r[8], "operating_hours": r[9]
         } for r in rows]
 
         return jsonify(results), 200
@@ -2828,14 +3546,17 @@ def load_profile(curr, user_id):
 
     elif role == "blood_bank":
         curr.execute("""
-            SELECT blood_bank_id, bank_name, license_number, operating_hours, verified_status
+            SELECT blood_bank_id, bank_name, license_number, operating_hours, verified_status,
+                   latitude, longitude
             FROM BloodBanks WHERE user_id = ?
         """, (user_id,))
         b = curr.fetchone()
         if b:
             profile.update({
                 "blood_bank_id": b[0], "bank_name": b[1], "license_number": b[2],
-                "operating_hours": b[3], "verified_status": b[4]
+                "operating_hours": b[3], "verified_status": b[4],
+                "latitude": float(b[5]) if b[5] is not None else None,
+                "longitude": float(b[6]) if b[6] is not None else None
             })
 
     return profile
@@ -2888,7 +3609,7 @@ def update_profile(user_id):
         if role == "member":
             fields += ["requester_type", "affiliated_hospital"]
         elif role == "blood_bank":
-            fields += ["bank_name", "license_number", "operating_hours"]
+            fields += ["bank_name", "license_number", "operating_hours", "latitude", "longitude"]
         merged = {f: params[f] if f in params else current.get(f) for f in fields}
         merged["role"] = role
 
@@ -2955,10 +3676,12 @@ def update_profile(user_id):
                     changes.append(f'{label} "{old or "none"}" -> "{new or "none"}"')
 
             curr.execute("""
-                UPDATE BloodBanks SET bank_name = ?, license_number = ?, operating_hours = ?
+                UPDATE BloodBanks SET bank_name = ?, license_number = ?, operating_hours = ?,
+                                      latitude = ?, longitude = ?
                 WHERE user_id = ?
             """, (merged["bank_name"].strip(), _clean(merged["license_number"]),
-                  _clean(merged["operating_hours"]), user_id))
+                  _clean(merged["operating_hours"]),
+                  _clean(merged.get("latitude")), _clean(merged.get("longitude")), user_id))
 
             if changes:
                 bank_name = merged["bank_name"].strip()
@@ -3172,8 +3895,13 @@ def donor_assessments():
                 "assessment_result": row[7], "assessment_note": row[8], "assessed_at": str(row[9])}), 200
 
         data = _body()
+        dob_row = _one("""SELECT u.date_of_birth FROM Donors d JOIN Users u ON d.user_id = u.user_id
+                          WHERE d.donor_id = ?""", (donor_id,))
+        dob = to_date(dob_row[0]) if dob_row else None
         try:
-            age = int(data.get("age"))
+            # the age is worked out from the birthday saved at sign-up;
+            # the typed age is only a fallback for old accounts with no birthday
+            age = calc_age(dob) if dob else int(data.get("age"))
             weight = float(data.get("weight_kg"))
         except (TypeError, ValueError):
             return jsonify({"message": "Enter a valid age and weight."}), 400
@@ -3284,7 +4012,7 @@ def create_donor_post():
             when_text = f" on {nxt.isoformat()}" if nxt and in_rest_period(donor[4]) else ""
             return jsonify({"message": f"You can post once you are eligible to donate again{when_text}."}), 400
 
-        curr.execute("""SELECT assessment_result FROM DonorAssessments
+        curr.execute("""SELECT assessment_result FROM donor_assessments
                         WHERE donor_id = ? ORDER BY assessed_at DESC LIMIT 1""", (donor_id,))
         assessment = curr.fetchone()
         if not assessment or assessment[0] != "eligible_to_proceed":
@@ -3732,6 +4460,12 @@ def migrate_to_member_accounts():
             curr.execute("ALTER TABLE BloodBankInventory MODIFY units_available DECIMAL(6,1) NOT NULL DEFAULT 0")
             print("[migrate] BloodBankInventory.units_available is now DECIMAL(6,1)")
 
+        # 6b. each bank may set its own minimum per blood group (NULL = rarity-based default)
+        try:
+            curr.execute("ALTER TABLE BloodBankInventory ADD COLUMN IF NOT EXISTS min_units DECIMAL(6,1) NULL")
+        except mariadb.Error as e:
+            print(f"[migrate] could not add BloodBankInventory.min_units: {e}")
+
         # 7. inventory audit log: who changed which stock, old/new values, and when.
         #    No foreign keys on purpose: log rows must survive even if a user or bank is removed.
         curr.execute("""
@@ -3748,6 +4482,23 @@ def migrate_to_member_accounts():
                 changed_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 INDEX idx_audit_bank_time (blood_bank_id, changed_at),
                 INDEX idx_audit_user (changed_by)
+            )
+        """)
+
+        # 7b. login history: every sign-in attempt (successful or not), for the admin screen.
+        #     No foreign keys on purpose, so rows survive if a user is removed.
+        curr.execute("""
+            CREATE TABLE IF NOT EXISTS LoginHistory (
+                login_id    INT AUTO_INCREMENT PRIMARY KEY,
+                user_id     INT NULL,
+                email       VARCHAR(150) NOT NULL,
+                success     TINYINT(1) NOT NULL,
+                reason      VARCHAR(40) NULL,
+                ip_address  VARCHAR(45) NULL,
+                user_agent  VARCHAR(255) NULL,
+                created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_login_time (created_at),
+                INDEX idx_login_user (user_id)
             )
         """)
 
@@ -3830,6 +4581,7 @@ def migrate_to_member_accounts():
             ("critical_reason", "VARCHAR(255) NULL"),
             ("critical_reviewed_by", "INT NULL"),
             ("critical_reviewed_at", "DATETIME NULL"),
+            ("fulfilled_at", "DATETIME NULL"),   # analytics: when the request was fulfilled
         ):
             try:
                 curr.execute(f"ALTER TABLE BloodRequests ADD COLUMN IF NOT EXISTS {col} {ddl}")
@@ -3885,6 +4637,268 @@ def create_admin_cli():
         sys.exit("That email is already registered.")
     finally:
         conn.close()
+
+
+# =====================================================================
+# PREDICTIVE ANALYTICS: BLOOD DEMAND AND SUPPLY FORECAST
+#   "How many units of each blood type will be requested (demand) and
+#    donated (supply) in the next weeks, and will the stock be enough?"
+#
+#   Three simple forecasting methods are tested on past weeks:
+#     naive      next week = the last week   (BASELINE: the bar a method must beat)
+#     average    next week = average of the last 4 weeks
+#     trend      k weeks ahead = average of the last 4 weeks + trend x k
+#                (trend = slope of the best straight line through the last
+#                 8 weeks, i.e. linear regression y = mx + b)
+#   Of "average" and "trend", the one with the lower MAE on past weeks is used.
+#   "naive" is only a yardstick: it just copies one week, so it can't plan ahead.
+#     MAE  = average of |forecast - actual|                (in units)
+#     MAPE = average of |forecast - actual| / actual x 100 (in %, weeks with actual > 0)
+#   Demand = units asked for in blood requests (cancelled ones excluded).
+#   Supply = units from completed donations (1 unit = 450 mL).
+# =====================================================================
+FORECAST_HISTORY_WEEKS = 12
+FORECAST_AVG_WEEKS = 4
+FORECAST_TREND_WEEKS = 8
+FORECAST_HORIZON_WEEKS = 4
+BLOOD_GROUPS = ["O+", "A+", "B+", "AB+", "O-", "A-", "B-", "AB-"]
+FORECAST_METHODS = {
+    "naive": "Same as last week",
+    "average": f"{FORECAST_AVG_WEEKS}-week average",
+    "trend": "Average + trend",
+}
+
+
+def _trend_slope(values):
+    """Slope of the least-squares straight line through the values (units per week)."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mx = (n - 1) / 2
+    my = sum(values) / n
+    den = sum((i - mx) ** 2 for i in range(n))
+    return sum((i - mx) * (v - my) for i, v in enumerate(values)) / den if den else 0.0
+
+
+def _forecast_series(history, horizon, method="trend"):
+    """history: weekly units, oldest first. Returns forecasts for the next `horizon` weeks."""
+    if not history:
+        return [0.0] * horizon
+    if method == "naive":
+        return [float(history[-1])] * horizon
+    recent = history[-FORECAST_AVG_WEEKS:]
+    base = sum(recent) / len(recent)
+    if method == "average":
+        return [base] * horizon
+    slope = _trend_slope(history[-FORECAST_TREND_WEEKS:])
+    return [max(0.0, base + slope * (k + 1)) for k in range(horizon)]
+
+
+def _backtest(history, method):
+    """Pretend we are standing at each past week and forecast the next one.
+       Returns (predicted per week or None, MAE, MAPE or None)."""
+    predicted = [None] * len(history)
+    errors, pct = [], []
+    for t in range(FORECAST_AVG_WEEKS, len(history)):
+        p = _forecast_series(history[:t], 1, method)[0]
+        predicted[t] = round(p, 1)
+        errors.append(abs(p - history[t]))
+        if history[t] > 0:
+            pct.append(abs(p - history[t]) / history[t] * 100)
+    mae = sum(errors) / len(errors) if errors else 0.0
+    mape = sum(pct) / len(pct) if pct else None
+    return predicted, mae, mape
+
+
+def ALLOW_FORECAST(u, kw):
+    if _admin(u):
+        return True
+    bank_id = request.args.get("blood_bank_id")
+    return bool(bank_id) and _owns_bank(u, bank_id)
+
+
+@app.route("/analytics/forecast", methods=["GET"])
+@require_auth("admin", "blood_bank", allow=ALLOW_FORECAST)
+def demand_forecast():
+    """?blood_bank_id=N  -> that bank's stock and donations;  no id (admin) -> all verified banks."""
+    conn = None
+    try:
+        bank_id = request.args.get("blood_bank_id")
+        conn = db_connect()
+        curr = conn.cursor()
+
+        # weeks start on Monday; the current (unfinished) week is not used for history
+        today = date.today()
+        this_monday = today - timedelta(days=today.weekday())
+        first_monday = this_monday - timedelta(weeks=FORECAST_HISTORY_WEEKS)
+        week_starts = [first_monday + timedelta(weeks=i) for i in range(FORECAST_HISTORY_WEEKS)]
+        future_starts = [this_monday + timedelta(weeks=i) for i in range(FORECAST_HORIZON_WEEKS)]
+
+        def bucket(rows):
+            weekly = {g: [0.0] * FORECAST_HISTORY_WEEKS for g in BLOOD_GROUPS}
+            for btype, d, units in rows:
+                idx = (d - first_monday).days // 7
+                if btype in weekly and 0 <= idx < FORECAST_HISTORY_WEEKS:
+                    weekly[btype][idx] += float(units)
+            return weekly
+
+        # DEMAND: blood requests across all of BloodLink
+        curr.execute("""
+            SELECT bt.blood_type, DATE(r.date_requested), r.quantity_needed
+            FROM BloodRequests r
+            JOIN BloodTypes bt ON r.blood_type_id = bt.blood_type_id
+            WHERE r.status <> 'cancelled' AND r.date_requested >= ? AND r.date_requested < ?
+        """, (first_monday, this_monday))
+        demand = bucket(curr.fetchall())
+
+        # SUPPLY: completed donations (this bank only, or every verified bank)
+        sql = """
+            SELECT bt.blood_type, DATE(dn.donation_date), dn.volume_ml / ?
+            FROM Donations dn
+            JOIN Donors d ON dn.donor_id = d.donor_id
+            JOIN BloodTypes bt ON d.blood_type_id = bt.blood_type_id
+            JOIN BloodBanks b ON dn.blood_bank_id = b.blood_bank_id
+            WHERE dn.status = 'completed' AND dn.donation_date >= ? AND dn.donation_date < ?
+        """
+        args = [UNIT_ML, first_monday, this_monday]
+        if bank_id:
+            sql += " AND dn.blood_bank_id = ?"
+            args.append(bank_id)
+        else:
+            sql += " AND b.verified_status = 'verified'"
+        curr.execute(sql, tuple(args))
+        supply = bucket(curr.fetchall())
+
+        # STOCK on hand and minimums
+        if bank_id:
+            curr.execute("SELECT bank_name FROM BloodBanks WHERE blood_bank_id = ?", (bank_id,))
+            row = curr.fetchone()
+            if row is None:
+                return jsonify({"message": "Blood bank not found."}), 404
+            scope_name = row[0]
+            curr.execute("""
+                SELECT bt.blood_type, COALESCE(i.units_available, 0), i.min_units
+                FROM BloodTypes bt
+                LEFT JOIN BloodBankInventory i ON i.blood_type_id = bt.blood_type_id AND i.blood_bank_id = ?
+            """, (bank_id,))
+        else:
+            scope_name = "All verified blood banks"
+            curr.execute("""
+                SELECT bt.blood_type, COALESCE(i.units_available, 0), i.min_units
+                FROM BloodBanks b
+                CROSS JOIN BloodTypes bt
+                LEFT JOIN BloodBankInventory i ON i.blood_type_id = bt.blood_type_id AND i.blood_bank_id = b.blood_bank_id
+                WHERE b.verified_status = 'verified'
+            """)
+        on_hand = {g: 0.0 for g in BLOOD_GROUPS}
+        minimum = {g: 0.0 for g in BLOOD_GROUPS}
+        for btype, units, min_units in curr.fetchall():
+            if btype in on_hand:
+                on_hand[btype] += float(units)
+                minimum[btype] += float(min_units) if min_units is not None else float(default_min_units(btype))
+
+        # ---- pick the method with the lowest error on past weeks (all groups' demand added together)
+        total_demand = [sum(demand[g][i] for g in BLOOD_GROUPS) for i in range(FORECAST_HISTORY_WEEKS)]
+        total_supply = [sum(supply[g][i] for g in BLOOD_GROUPS) for i in range(FORECAST_HISTORY_WEEKS)]
+        comparison = []
+        for key, label in FORECAST_METHODS.items():
+            _p, mae, mape = _backtest(total_demand, key)
+            comparison.append({"method": key, "label": label, "mae": round(mae, 2),
+                               "mape": round(mape) if mape is not None else None})
+        candidates = [c for c in comparison if c["method"] != "naive"]
+        best = min(candidates, key=lambda c: (c["mae"], list(FORECAST_METHODS).index(c["method"])))["method"]
+        baseline_mae = next(c["mae"] for c in comparison if c["method"] == "naive")
+        for c in comparison:
+            c["used"] = c["method"] == best
+            c["baseline"] = c["method"] == "naive"
+
+        H = FORECAST_HORIZON_WEEKS
+        groups = []
+        for g in BLOOD_GROUPS:
+            d_hist, s_hist = demand[g], supply[g]
+            d_fc = _forecast_series(d_hist, H, best)
+            s_fc = _forecast_series(s_hist, H, best)
+            _pred, err, _mape = _backtest(d_hist, best)
+            next7 = d_fc[0]
+            per_day = next7 / 7
+            days_left = (on_hand[g] / per_day) if per_day > 0 else None
+            projected = on_hand[g] + sum(s_fc) - sum(d_fc)      # stock expected after the forecast weeks
+            if next7 > 0 and on_hand[g] < next7:
+                status = "short_now"                           # not enough even for next week
+            elif projected < 0:
+                status = "shortage"                            # runs out within the forecast weeks
+            elif projected < minimum[g]:
+                status = "below_min"                           # enough, but under the minimum to keep
+            elif sum(d_fc) <= 0:
+                status = "no_demand"
+            else:
+                status = "enough"
+            prev4, last4 = sum(d_hist[-8:-4]), sum(d_hist[-4:])
+            groups.append({
+                "blood_type": g,
+                "history": [round(v, 1) for v in d_hist],
+                "forecast": [round(v, 1) for v in d_fc],
+                "low": [round(max(0.0, v - err), 1) for v in d_fc],
+                "high": [round(v + err, 1) for v in d_fc],
+                "avg_error": round(err, 1),
+                "supply_history": [round(v, 1) for v in s_hist],
+                "supply_forecast": [round(v, 1) for v in s_fc],
+                "on_hand": round(on_hand[g], 1),
+                "min_units": round(minimum[g], 1),
+                "next7": round(next7, 1),
+                "next4w": round(sum(d_fc), 1),
+                "supply_next4w": round(sum(s_fc), 1),
+                "projected": round(projected, 1),
+                "per_day": round(per_day, 2),
+                "days_left": round(days_left) if days_left is not None else None,
+                "shortfall": round(max(0.0, minimum[g] - projected), 1),
+                "trend_pct": round((last4 - prev4) / prev4 * 100) if prev4 else None,
+                "status": status,
+            })
+
+        total_fc = _forecast_series(total_demand, H, best)
+        total_pred, total_mae, total_mape = _backtest(total_demand, best)
+        return jsonify({
+            "scope": "bank" if bank_id else "all",
+            "scope_name": scope_name,
+            "week_labels": [d.isoformat() for d in week_starts],
+            "forecast_labels": [d.isoformat() for d in future_starts],
+            "groups": groups,
+            "total": {
+                "history": [round(v, 1) for v in total_demand],
+                "forecast": [round(v, 1) for v in total_fc],
+                "low": [round(max(0.0, v - total_mae), 1) for v in total_fc],
+                "high": [round(v + total_mae, 1) for v in total_fc],
+                "predicted_past": total_pred,
+                "supply_history": [round(v, 1) for v in total_supply],
+                "supply_forecast": [round(v, 1) for v in _forecast_series(total_supply, H, best)],
+                "next4w": round(sum(total_fc), 1),
+                "last4w": round(sum(total_demand[-4:]), 1),
+            },
+            "accuracy": {
+                "mae": round(total_mae, 2),
+                "mape": round(total_mape) if total_mape is not None else None,
+                "weeks_tested": FORECAST_HISTORY_WEEKS - FORECAST_AVG_WEEKS,
+            },
+            "comparison": comparison,
+            "beats_baseline": total_mae <= baseline_mae,
+            "method": {
+                "used": best,
+                "used_label": FORECAST_METHODS[best],
+                "avg_weeks": FORECAST_AVG_WEEKS,
+                "trend_weeks": FORECAST_TREND_WEEKS,
+                "history_weeks": FORECAST_HISTORY_WEEKS,
+                "horizon_weeks": H,
+            },
+        }), 200
+
+    except mariadb.Error as e:
+        return jsonify({"message": "Database error.", "error": _log_db_error(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
 
 
 if __name__ == "__main__":

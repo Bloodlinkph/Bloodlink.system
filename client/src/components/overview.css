@@ -5,12 +5,12 @@
 .ov-wrap {
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 14px;
   text-align: left;
 }
 
 .ov-greeting {
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   font-family: 'Playfair Display', Georgia, serif;
   font-weight: 600;
   font-size: 26px;
@@ -30,15 +30,15 @@
 .ov-attention {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .ov-banner {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 13px 16px;
-  border-radius: 14px;
+  padding: 10px 14px;
+  border-radius: 12px;
   border: 1px solid #f0e3e4;
   border-left-width: 4px;
   background: #fff;
@@ -92,17 +92,22 @@
 
 .ov-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  gap: 12px;
+  align-items: stretch;
 }
 
 .ov-stat {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 18px 20px;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px;
   border: 1px solid #f0e3e4;
-  border-radius: 16px;
+  border-radius: 14px;
   background: #fff;
   text-align: left;
   font-family: 'Inter', system-ui, sans-serif;
@@ -135,7 +140,7 @@
 
 .ov-stat-value {
   font-family: 'Playfair Display', Georgia, serif;
-  font-size: 28px;
+  font-size: clamp(22px, 2.2vw, 28px);
   font-weight: 600;
   line-height: 1.15;
   overflow-wrap: anywhere;
@@ -158,14 +163,13 @@
 .ov-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
 @media (max-width: 520px) {
   .ov-greeting { font-size: 22px; }
-  .ov-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
-  .ov-stat { padding: 14px 14px; }
-  .ov-stat-value { font-size: 23px; }
+  .ov-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .ov-stat { padding: 12px; }
   .ov-banner { flex-wrap: wrap; }
   .ov-banner-text { flex-basis: calc(100% - 24px); }
   .ov-actions > button { flex: 1 1 100%; }

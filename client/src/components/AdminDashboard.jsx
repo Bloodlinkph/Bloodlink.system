@@ -2,12 +2,18 @@ import { useState, useEffect, useRef } from "react";
 import api from "../api";
 import NotificationBell, { NotificationsSection } from "./NotificationBell";
 import ProfileSection from "./ProfileSection";
+import AuditLogs from "./AuditLogs";
+import LoginHistory from "./LoginHistory";
+import DemandForecast from "./DemandForecast";
 import ConfirmDialog from "./ConfirmDialog";
+import CriticalReview from "./CriticalReview";
+import UserFormModal from "./UserFormModal";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { formatUnits, formatChange, UNIT_ML } from "./units";
 import "./dashboard.css";
 import "./bloodbank-v9.css";
+import Loading from "./Loading";
 
 const USER_TONE = { active: "ok", pending: "warn", disabled: "crit" };
 const VERIFY_TONE = { verified: "ok", pending: "warn", rejected: "crit" };
@@ -21,11 +27,14 @@ const isOpenReq = (r) => r.status === "pending" || r.status === "matched";
 
 const SUBTITLES = {
   overview: "What is happening across all of BloodLink.",
-  users: "Activate or disable accounts.",
+  users: "Add, edit, activate or disable accounts.",
   bloodbanks: "Review blood banks and verify their licenses.",
   requests: "All blood requests posted in the system (read-only).",
   audit: "Every inventory change made by blood banks and admins.",
+  auditlogs: "Account, verification and security actions recorded by the system.",
+  loginhistory: "Every sign-in attempt, with the time, device and result.",
   reports: "Totals, monthly trends and downloadable CSV files.",
+  analytics: "How much blood will be requested in the coming weeks, and how long the stock of all verified banks will last.",
   profile: "Your details and sign-in settings.",
   notifications: "Updates about your account.",
 };
@@ -136,24 +145,35 @@ function TrendChart({ rows = [] }) {
   );
 }
 
-// ---------- line chart: units donated (green) vs requested (red) per blood group ----------
+// ---------- bar chart: units donated (green) vs requested (red) per blood group ----------
 // rows = [{ g: "A+", donated: 4, requested: 6 }, ...]
 const LINE_DONATED = "#2e7d32";
 const LINE_REQUESTED = "#c62828";
 
-function BloodTypeLines({ rows = [] }) {
-  const W = 520, H = 220;
-  const pad = { l: 36, r: 16, t: 14, b: 28 };
+function BloodTypeBars({ rows = [] }) {
+  const W = 520, H = 230;
+  const pad = { l: 36, r: 16, t: 16, b: 30 };
   const iw = W - pad.l - pad.r;
   const ih = H - pad.t - pad.b;
 
   let max = Math.max(0, ...rows.flatMap((r) => [r.donated, r.requested]));
   max = Math.max(4, Math.ceil(max / 4) * 4); // multiple of 4 so every tick is a whole unit
   const ticks = [0, 1, 2, 3, 4].map((f) => (max / 4) * f);
-  const x = (i) => pad.l + (rows.length > 1 ? (i / (rows.length - 1)) * iw : iw / 2);
   const y = (v) => pad.t + ih - (v / max) * ih;
-  const path = (key) => rows.map((r, i) => `${i ? "L" : "M"}${x(i)},${y(r[key])}`).join(" ");
+  const slot = iw / Math.max(rows.length, 1);
+  const barW = Math.min(18, slot * 0.34);
+  const gap = 3;
+  const cx = (i) => pad.l + slot * i + slot / 2;
   const empty = rows.every((r) => r.donated === 0 && r.requested === 0);
+
+  const Bar = ({ x, v, color, label }) => (
+    <g>
+      <rect x={x} y={y(v)} width={barW} height={Math.max(0, pad.t + ih - y(v))} fill={color} rx="2">
+        <title>{label}</title>
+      </rect>
+      {v > 0 && <text x={x + barW / 2} y={y(v) - 4} textAnchor="middle" className="ct">{formatUnits(v)}</text>}
+    </g>
+  );
 
   return (
     <div className="chart">
@@ -169,23 +189,12 @@ function BloodTypeLines({ rows = [] }) {
           </g>
         ))}
         {rows.map((r, i) => (
-          <text key={r.g} x={x(i)} y={H - 8} textAnchor="middle" className="cv">{gtxt(r.g)}</text>
-        ))}
-
-        <path d={path("requested")} fill="none" stroke={LINE_REQUESTED} strokeWidth="2.5" strokeLinejoin="round" />
-        <path d={path("donated")} fill="none" stroke={LINE_DONATED} strokeWidth="2.5" strokeLinejoin="round" />
-
-        {rows.map((r, i) => (
           <g key={r.g}>
-            <circle cx={x(i)} cy={y(r.requested)} r="4.5" fill="#fff" stroke={LINE_REQUESTED} strokeWidth="2">
-              <title>{`${gtxt(r.g)}: ${r.requested} requested`}</title>
-            </circle>
-            <circle cx={x(i)} cy={y(r.donated)} r="4.5" fill="#fff" stroke={LINE_DONATED} strokeWidth="2">
-              <title>{`${gtxt(r.g)}: ${r.donated} donated`}</title>
-            </circle>
+            <Bar x={cx(i) - barW - gap / 2} v={r.donated} color={LINE_DONATED} label={`${gtxt(r.g)}: ${formatUnits(r.donated)} donated`} />
+            <Bar x={cx(i) + gap / 2} v={r.requested} color={LINE_REQUESTED} label={`${gtxt(r.g)}: ${formatUnits(r.requested)} requested`} />
+            <text x={cx(i)} y={H - 10} textAnchor="middle" className="cv">{gtxt(r.g)}</text>
           </g>
         ))}
-
         {empty && <text x={W / 2} y={H / 2} textAnchor="middle" className="ct">Nothing recorded yet.</text>}
       </svg>
     </div>
@@ -281,7 +290,7 @@ function AdminMap({ banks = [], requests = [], height = 420 }) {
       })
         .bindTooltip(
           tip(
-            `Request #${r.request_id} · ${r.blood_type}`,
+            `Request #${r.request_id} · ${gtxt(r.blood_type)}`,
             `${r.requester_name || ""} · ${r.urgency_level || ""}${r.location_needed ? " · " + r.location_needed : ""}`
           )
         )
@@ -343,6 +352,8 @@ function AdminDashboard({ user, onLogout }) {
 
   const [users, setUsers] = useState([]);
   const [filter, setFilter] = useState("pending");
+  const [searchInput, setSearchInput] = useState(""); // what is typed in the search box
+  const [search, setSearch] = useState("");           // the search that is applied (after pressing Search)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -352,6 +363,28 @@ function AdminDashboard({ user, onLogout }) {
 
   // "Are you sure?" for destructive actions: { title, message, confirmLabel, onConfirm }
   const [confirm, setConfirm] = useState(null);
+
+  // add / edit user dialog: null (closed) or { mode: "add" | "edit", initial }
+  const [userForm, setUserForm] = useState(null);
+
+  const openEditUser = async (u) => {
+    setMessage("");
+    setError("");
+    try {
+      const res = await api.get(`/profile/${u.user_id}`); // full details (address, bank name ...)
+      setUserForm({ mode: "edit", initial: { ...res.data, password: "" } });
+    } catch (err) {
+      setError(err.response?.data?.message || "Could not load that user.");
+    }
+  };
+
+  const onUserSaved = (msg) => {
+    setUserForm(null);
+    setMessage(msg);
+    fetchUsers(filter);
+    fetchBloodbanks();
+    loadOverview();
+  };
 
   const [auditLog, setAuditLog] = useState([]);
   const [auditLoading, setAuditLoading] = useState(false);
@@ -500,7 +533,7 @@ function AdminDashboard({ user, onLogout }) {
       await api.put(`/admin/bloodbanks/${blood_bank_id}/verify`, { verified_status: newStatus });
       const accountNote =
         newStatus === "verified" ? " Its login account is now active."
-        : newStatus === "rejected" ? " Its login account is now disabled."
+        : newStatus === "rejected" ? " Its login stays active so it can correct its details and re-apply."
         : "";
       setMessage(`Blood bank verification updated to "${newStatus}".${accountNote}`);
       fetchBloodbanks();
@@ -527,6 +560,28 @@ function AdminDashboard({ user, onLogout }) {
   };
 
   const pendingBanks = bloodbanks.filter((bb) => bb.verified_status === "pending").length;
+  const pendingCritical = (ov?.requests || []).filter(
+    (r) => r.critical_status === "pending" && (r.status === "pending" || r.status === "matched")
+  ).length;
+  // user search: name, email, contact number, role or status
+  const visibleUsers = users.filter((u) => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return [u.full_name, u.email, u.contact_number, u.role, u.account_status]
+      .some((v) => String(v ?? "").toLowerCase().includes(q));
+  });
+  // filters live: results show from the first letter typed, no need to press Search
+  const onUserSearchChange = (value) => {
+    setSearchInput(value);
+    setSearch(value);
+    if (value.trim() && filter !== "") setFilter(""); // search across all statuses
+  };
+  const runUserSearch = (e) => e.preventDefault(); // Enter / Search button: the list is already filtered
+  const clearUserSearch = () => {
+    setSearchInput("");
+    setSearch("");
+  };
+
   const pendingUsers = ov ? ov.users.filter((u) => u.account_status === "pending").length : 0;
 
   // sidebar groups
@@ -536,6 +591,7 @@ function AdminDashboard({ user, onLogout }) {
       items: [
         { id: "overview", label: "Dashboard", title: "System overview" },
         { id: "reports", label: "Reports" },
+        { id: "analytics", label: "Predictive analytics", title: "Predictive analytics" },
       ],
     },
     {
@@ -548,8 +604,10 @@ function AdminDashboard({ user, onLogout }) {
     {
       heading: "Records",
       items: [
-        { id: "requests", label: "Blood requests" },
+        { id: "requests", label: "Blood requests", badge: pendingCritical, crit: true },
         { id: "audit", label: "Inventory audit" },
+        { id: "auditlogs", label: "Audit logs" },
+        { id: "loginhistory", label: "Login history" },
       ],
     },
     {
@@ -579,6 +637,8 @@ function AdminDashboard({ user, onLogout }) {
     const fulfilled = ov.requests.filter((r) => r.status === "fulfilled");
     const countable = ov.requests.filter((r) => r.status !== "cancelled").length;
     const rate = countable ? Math.round((fulfilled.length / countable) * 100) : 0;
+    const matchedReqs = ov.requests.filter((r) => r.status === "matched").length;
+    const pendingReqs = ov.requests.filter((r) => r.status === "pending").length;
     const fulfilledUnits = fulfilled.reduce((s, r) => s + (Number(r.quantity_needed) || 0), 0);
 
     // donations: find each donor's blood type even if the donation row doesn't have it
@@ -692,7 +752,7 @@ function AdminDashboard({ user, onLogout }) {
     });
 
     o = {
-      members, verifiedBanks, openReqs, critOpen, fulfilled, countable, rate, fulfilledUnits,
+      members, verifiedBanks, openReqs, critOpen, fulfilled, countable, rate, fulfilledUnits, matchedReqs, pendingReqs,
       done, unitsDonated, topDonors, typeRows, maxDonated, maxRequested, topDonatedType, topRequestedType,
       attention, monthRows, trend, bloodOf, unitsOf,
       availableDonors: ov.donors.filter((d) => d.availability_status === "available" && d.eligibility_status === "eligible").length,
@@ -823,6 +883,13 @@ function AdminDashboard({ user, onLogout }) {
                     {current.id === "overview" && ` ${today}`}
                   </p>
                 </div>
+                {current.id === "users" && (
+                  <div className="actions">
+                    <button type="button" className="btn pri" onClick={() => setUserForm({ mode: "add", initial: {} })}>
+                      + Add user
+                    </button>
+                  </div>
+                )}
                 {(current.id === "overview" || current.id === "reports") && (
                   <div className="actions">
                     {ovUpdated && (
@@ -841,13 +908,16 @@ function AdminDashboard({ user, onLogout }) {
               {error && <div className="msg err">{error}</div>}
 
               {(current.id === "overview" || current.id === "reports") && ovLoading && !o && (
-                <div className="panel"><div className="empty">Loading...</div></div>
+                <div className="panel"><div className="empty"><Loading label="Loading..." /></div></div>
               )}
               {(current.id === "overview" || current.id === "reports") && o && ov.failed.length > 0 && (
                 <div className="msg err">
                   Some data could not be loaded: {ov.failed.join(", ")}. The numbers that depend on it may be incomplete.
                 </div>
               )}
+
+              {/* ============ PREDICTIVE ANALYTICS ============ */}
+              {current.id === "analytics" && <DemandForecast />}
 
               {/* ============ OVERVIEW ============ */}
               {current.id === "overview" && o && (
@@ -862,9 +932,22 @@ function AdminDashboard({ user, onLogout }) {
                         </div>
                       </div>
                       <div>
-                        <div className="mix" role="img" aria-label={`${o.rate}% of requests fulfilled`}>
-                          <span style={{ flex: `${Math.max(o.fulfilled.length, 0.0001)} 1 0` }}>{o.rate >= 12 ? "Fulfilled" : ""}</span>
-                          <span style={{ flex: `${Math.max(o.countable - o.fulfilled.length, 0.0001)} 1 0` }} />
+                        <div className="mix" role="img" aria-label={`${o.fulfilled.length} fulfilled, ${o.matchedReqs} matched, ${o.pendingReqs} pending`}>
+                          {o.fulfilled.length > 0 && (
+                            <span className="seg-ok" style={{ flex: `${o.fulfilled.length} 1 0` }} title={`Fulfilled: ${o.fulfilled.length}`}>{o.fulfilled.length}</span>
+                          )}
+                          {o.matchedReqs > 0 && (
+                            <span className="seg-matched" style={{ flex: `${o.matchedReqs} 1 0` }} title={`Matched (not yet fulfilled): ${o.matchedReqs}`}>{o.matchedReqs}</span>
+                          )}
+                          {o.pendingReqs > 0 && (
+                            <span className="seg-pending" style={{ flex: `${o.pendingReqs} 1 0` }} title={`Pending (not yet fulfilled): ${o.pendingReqs}`}>{o.pendingReqs}</span>
+                          )}
+                          {o.countable === 0 && <span className="seg-pending" style={{ flex: "1 1 0" }} />}
+                        </div>
+                        <div className="mix-key">
+                          <span><i className="sw seg-ok" />Fulfilled ({o.fulfilled.length})</span>
+                          <span><i className="sw seg-matched" />Matched ({o.matchedReqs})</span>
+                          <span><i className="sw seg-pending" />Pending ({o.pendingReqs})</span>
                         </div>
                         <div className="mix-l">
                           {formatUnits(o.fulfilledUnits)} units delivered · cancelled requests are not counted
@@ -902,7 +985,7 @@ function AdminDashboard({ user, onLogout }) {
                   </div>
 
                   {/* CHARTS: monthly trend + donated vs requested by blood group */}
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
+                  <div className="grid-auto">
                     <div className="panel">
                       <div className="panel-h">
                         <h3>Collections and issues<span className="sub">Units per month</span></h3>
@@ -913,7 +996,7 @@ function AdminDashboard({ user, onLogout }) {
                       <div className="panel-h">
                         <h3>Blood groups<span className="sub">Units donated vs requested, all time</span></h3>
                       </div>
-                      <BloodTypeLines rows={o.typeRows} />
+                      <BloodTypeBars rows={o.typeRows} />
                     </div>
                   </div>
 
@@ -922,95 +1005,89 @@ function AdminDashboard({ user, onLogout }) {
                     <div className="panel-h">
                       <h3>Map<span className="sub">Verified blood banks and open blood requests</span></h3>
                     </div>
-                    <div style={{ padding: 12 }}>
+                    <div className="panel-b map-b">
                       <AdminMap banks={o.verifiedBanks} requests={o.openReqs} />
                     </div>
                   </div>
 
-                  <div className="grid-3" style={{ alignItems: "start" }}>
-                    {/* LEFT COLUMN */}
-                    <div style={{ display: "grid", gap: 16, minWidth: 0 }}>
-                      {/* TOP DONORS */}
-                      <div className="panel" style={{ margin: 0 }}>
-                        <div className="panel-h">
-                          <h3>Top donors<span className="sub">Most completed donations</span></h3>
-                        </div>
-                        <div className="tw">
-                          <table>
-                            <thead><tr><th>#</th><th>Donor</th><th>Group</th><th className="r">Donations</th><th className="r">Units</th></tr></thead>
-                            <tbody>
-                              {o.topDonors.length === 0 && <tr><td colSpan="5" className="empty">No completed donations yet.</td></tr>}
-                              {o.topDonors.map((d, i) => (
-                                <tr key={d.key}>
-                                  <td className="num">{i + 1}</td>
-                                  <td className="wrap"><b>{d.name}</b>{i === 0 && <span className="muted"> · top donor</span>}</td>
-                                  <td>{d.blood ? <b className="grp">{gtxt(d.blood)}</b> : "—"}</td>
-                                  <td className="r num"><b>{d.count}</b></td>
-                                  <td className="r num">{formatUnits(d.units)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
+                  <div className="grid-auto wide">
+                    {/* TOP DONORS */}
+                    <div className="panel">
+                      <div className="panel-h">
+                        <h3>Top donors<span className="sub">Most completed donations</span></h3>
                       </div>
-
-                      {/* URGENT OPEN REQUESTS */}
-                      <div className="panel" style={{ margin: 0 }}>
-                        <div className="panel-h">
-                          <h3>Urgent open requests</h3>
-                          <button type="button" className="link" onClick={() => { setReqFilter("open"); goTo("requests"); }}>View all</button>
-                        </div>
-                        <div className="tw">
-                          <table>
-                            <thead><tr><th>Requester</th><th>Group</th><th className="r">Units</th><th>Urgency</th></tr></thead>
-                            <tbody>
-                              {o.openReqs.length === 0 && <tr><td colSpan="4" className="empty">No open requests.</td></tr>}
-                              {[...o.openReqs]
-                                .sort((a, b) => {
-                                  const rank = { critical: 0, high: 1, medium: 2, low: 3 };
-                                  return (rank[String(a.urgency_level).toLowerCase()] ?? 4) - (rank[String(b.urgency_level).toLowerCase()] ?? 4);
-                                })
-                                .slice(0, 5)
-                                .map((q) => (
-                                  <tr key={q.request_id}>
-                                    <td className="wrap">{q.requester_name}</td>
-                                    <td><b className="grp">{gtxt(q.blood_type)}</b></td>
-                                    <td className="r num">{formatUnits(q.quantity_needed)}</td>
-                                    <td><Status value={q.urgency_level} tones={URGENCY_TONE} /></td>
-                                  </tr>
-                                ))}
-                            </tbody>
-                          </table>
-                        </div>
+                      <div className="tw">
+                        <table>
+                          <thead><tr><th>#</th><th>Donor</th><th>Group</th><th className="r">Donations</th><th className="r">Units</th></tr></thead>
+                          <tbody>
+                            {o.topDonors.length === 0 && <tr><td colSpan="5" className="empty">No completed donations yet.</td></tr>}
+                            {o.topDonors.map((d, i) => (
+                              <tr key={d.key}>
+                                <td className="num">{i + 1}</td>
+                                <td className="wrap"><b>{d.name}</b>{i === 0 && <span className="muted"> · top donor</span>}</td>
+                                <td>{d.blood ? <b className="grp">{gtxt(d.blood)}</b> : "—"}</td>
+                                <td className="r num"><b>{d.count}</b></td>
+                                <td className="r num">{formatUnits(d.units)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
 
-                    {/* RIGHT COLUMN */}
-                    <div style={{ display: "grid", gap: 16, minWidth: 0 }}>
-                      {/* RECENT INVENTORY ACTIVITY */}
-                      <div className="panel" style={{ margin: 0 }}>
-                        <div className="panel-h">
-                          <h3>Recent inventory activity</h3>
-                          <button type="button" className="link" onClick={() => goTo("audit")}>View all</button>
-                        </div>
-                        <div className="tw">
-                          <table>
-                            <thead><tr><th>Blood bank</th><th>Group</th><th>Change</th><th>When</th></tr></thead>
-                            <tbody>
-                              {ov.audit.length === 0 && <tr><td colSpan="4" className="empty">No recent changes.</td></tr>}
-                              {ov.audit.slice(0, 5).map((a) => (
-                                <tr key={a.audit_id}>
-                                  <td className="wrap">{a.bank_name}</td>
-                                  <td><b className="grp">{gtxt(a.blood_type)}</b></td>
-                                  <td>
-                                    <span className={`st ${a.change_units > 0 ? "ok" : "crit"} num`}>{formatChange(a.change_units)}</span>
-                                  </td>
-                                  <td className="num">{a.changed_at}</td>
+                    {/* URGENT OPEN REQUESTS */}
+                    <div className="panel">
+                      <div className="panel-h">
+                        <h3>Urgent open requests</h3>
+                        <button type="button" className="link" onClick={() => { setReqFilter("open"); goTo("requests"); }}>View all</button>
+                      </div>
+                      <div className="tw">
+                        <table>
+                          <thead><tr><th>Requester</th><th>Group</th><th className="r">Units</th><th>Urgency</th></tr></thead>
+                          <tbody>
+                            {o.openReqs.length === 0 && <tr><td colSpan="4" className="empty">No open requests.</td></tr>}
+                            {[...o.openReqs]
+                              .sort((a, b) => {
+                                const rank = { critical: 0, high: 1, medium: 2, low: 3 };
+                                return (rank[String(a.urgency_level).toLowerCase()] ?? 4) - (rank[String(b.urgency_level).toLowerCase()] ?? 4);
+                              })
+                              .slice(0, 5)
+                              .map((q) => (
+                                <tr key={q.request_id}>
+                                  <td className="wrap">{q.requester_name}</td>
+                                  <td><b className="grp">{gtxt(q.blood_type)}</b></td>
+                                  <td className="r num">{formatUnits(q.quantity_needed)}</td>
+                                  <td><Status value={q.urgency_level} tones={URGENCY_TONE} /></td>
                                 </tr>
                               ))}
-                            </tbody>
-                          </table>
-                        </div>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* RECENT INVENTORY ACTIVITY */}
+                    <div className="panel">
+                      <div className="panel-h">
+                        <h3>Recent inventory activity</h3>
+                        <button type="button" className="link" onClick={() => goTo("audit")}>View all</button>
+                      </div>
+                      <div className="tw">
+                        <table>
+                          <thead><tr><th>Blood bank</th><th>Group</th><th>Change</th><th>When</th></tr></thead>
+                          <tbody>
+                            {ov.audit.length === 0 && <tr><td colSpan="4" className="empty">No recent changes.</td></tr>}
+                            {ov.audit.slice(0, 5).map((a) => (
+                              <tr key={a.audit_id}>
+                                <td className="wrap">{a.bank_name}</td>
+                                <td><b className="grp">{gtxt(a.blood_type)}</b></td>
+                                <td>
+                                  <span className={`st ${a.change_units > 0 ? "ok" : "crit"} num`}>{formatChange(a.change_units)}</span>
+                                </td>
+                                <td className="num">{a.changed_at}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
                   </div>
@@ -1102,12 +1179,29 @@ function AdminDashboard({ user, onLogout }) {
                       <option value="active">Active</option>
                       <option value="disabled">Disabled</option>
                     </select>
+                    <form onSubmit={runUserSearch} style={{ display: "inline-flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
+                      <input
+                        type="search"
+                        className="in"
+                        placeholder="Search name, email, contact or role"
+                        aria-label="Search users"
+                        value={searchInput}
+                        onChange={(e) => onUserSearchChange(e.target.value)}
+                        style={{ minWidth: 240 }}
+                      />
+                      <button type="submit" className="btn pri sm">Search</button>
+                      {(search || searchInput) && (
+                        <button type="button" className="btn sm" onClick={clearUserSearch}>Clear</button>
+                      )}
+                    </form>
                   </div>
 
                   {loading ? (
-                    <div className="empty">Loading users...</div>
-                  ) : users.length === 0 ? (
-                    <div className="empty">No users found for this filter.</div>
+                    <div className="empty"><Loading label="Loading users..." /></div>
+                  ) : visibleUsers.length === 0 ? (
+                    <div className="empty">
+                      {search.trim() ? `No users match "${search.trim()}".` : "No users found for this filter."}
+                    </div>
                   ) : (
                     <div className="tw">
                       <table>
@@ -1122,7 +1216,7 @@ function AdminDashboard({ user, onLogout }) {
                           </tr>
                         </thead>
                         <tbody>
-                          {users.map((u) => (
+                          {visibleUsers.map((u) => (
                             <tr key={u.user_id}>
                               <td>{u.full_name}</td>
                               <td>{u.email}</td>
@@ -1131,6 +1225,9 @@ function AdminDashboard({ user, onLogout }) {
                               <td><Status value={u.account_status} tones={USER_TONE} /></td>
                               <td className="r">
                                 <span style={{ display: "inline-flex", gap: 6 }}>
+                                  <button type="button" className="btn sm" onClick={() => openEditUser(u)}>
+                                    Edit
+                                  </button>
                                   {u.account_status !== "active" && (
                                     <button type="button" className="btn pri sm" onClick={() => updateStatus(u.user_id, "active")}>
                                       Activate
@@ -1167,7 +1264,7 @@ function AdminDashboard({ user, onLogout }) {
               {current.id === "bloodbanks" && (
                 <div className="panel">
                   {bbLoading ? (
-                    <div className="empty">Loading blood banks...</div>
+                    <div className="empty"><Loading label="Loading blood banks..." /></div>
                   ) : bloodbanks.length === 0 ? (
                     <div className="empty">No blood banks registered yet.</div>
                   ) : (
@@ -1231,9 +1328,10 @@ function AdminDashboard({ user, onLogout }) {
               {current.id === "requests" && (
                 <div className="panel">
                   {ovLoading && !ov ? (
-                    <div className="empty">Loading requests...</div>
+                    <div className="empty"><Loading label="Loading requests..." /></div>
                   ) : (
                     <>
+                      <CriticalReview requests={ov.requests} onReviewed={loadOverview} />
                       <div className="tabs">
                         {reqTabs.map((t) => (
                           <button key={t.id} type="button" className={reqFilter === t.id ? "on" : ""} onClick={() => setReqFilter(t.id)}>
@@ -1291,7 +1389,7 @@ function AdminDashboard({ user, onLogout }) {
                   </div>
 
                   {auditLoading ? (
-                    <div className="empty">Loading audit log...</div>
+                    <div className="empty"><Loading label="Loading audit log..." /></div>
                   ) : auditLog.length === 0 ? (
                     <div className="empty">No inventory changes recorded yet.</div>
                   ) : (
@@ -1313,7 +1411,7 @@ function AdminDashboard({ user, onLogout }) {
                             <tr key={a.audit_id}>
                               <td className="num">{a.changed_at}</td>
                               <td>{a.bank_name}</td>
-                              <td><span className="grp">{a.blood_type}</span></td>
+                              <td><span className="grp">{gtxt(a.blood_type)}</span></td>
                               <td className="r num">{formatUnits(a.old_units)}</td>
                               <td className="r num">{formatUnits(a.new_units)}</td>
                               <td>
@@ -1333,6 +1431,12 @@ function AdminDashboard({ user, onLogout }) {
                   )}
                 </div>
               )}
+
+              {/* AUDIT LOGS */}
+              {current.id === "auditlogs" && <AuditLogs />}
+
+              {/* LOGIN HISTORY */}
+              {current.id === "loginhistory" && <LoginHistory />}
 
               {/* EDIT PROFILE */}
               {current.id === "profile" && (
@@ -1365,6 +1469,16 @@ function AdminDashboard({ user, onLogout }) {
           run();
         }}
       />
+
+      {userForm && (
+        <UserFormModal
+          key={userForm.initial?.user_id ?? "new"}
+          mode={userForm.mode}
+          initial={userForm.initial}
+          onClose={() => setUserForm(null)}
+          onSaved={onUserSaved}
+        />
+      )}
     </div>
   );
 }

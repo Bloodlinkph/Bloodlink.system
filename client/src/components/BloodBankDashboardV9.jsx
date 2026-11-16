@@ -1,15 +1,22 @@
-    import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
     import api from "../api";
     import NotificationBell, { NotificationsSection } from "./NotificationBell";
     import ProfileSection from "./ProfileSection";
+import DemandForecast from "./DemandForecast";
+import CriticalReview from "./CriticalReview";
+import Loading from "./Loading";
     import ConfirmDialog from "./ConfirmDialog";
     import { prettify } from "./Overview";
     import { UNIT_HINT, UNIT_ERROR, UNIT_ML, formatUnits, formatChange, unitLabel, isValidUnits } from "./units";
+    import FieldError from "./FieldError";
+    import { validate, hasErrors, required, units as unitsRule, unitsOrZero, oneOf, maxLen, focusFirstError } from "../validation";
     import "./dashboard.css"; // still used by ProfileSection / NotificationsSection
     import "./bloodbank-v9.css";
 
     const GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
-    const MIN_UNITS = 10; // a group below this is "Low"; below half of it is "Critical"
+    // Each group's minimum comes from the server: the bank's own value, or a default based on
+    // how common that blood type is (common groups are used more, so they need a bigger reserve).
+    // Below the minimum is "Low"; below half of it is "Critical".
     const CRIT_RATIO = 0.5;
 
     // red blood cell compatibility (same table the landing page uses)
@@ -25,10 +32,19 @@
     };
 
     const gtxt = (g) => String(g || "").replace("-", "−");
-    const level = (on) => {
-    const r = on / MIN_UNITS;
+    // one brand-matched colour per blood group (rose = A/B, sand = AB, mauve = O; lighter = positive)
+    const GROUP_COLORS = {
+        "A+": { bg: "#fde8e4", fg: "#6a1018" }, "A-": { bg: "#f4b6b2", fg: "#6a1018" },
+        "B+": { bg: "#e9858d", fg: "#fff" },    "B-": { bg: "#c9525f", fg: "#fff" },
+        "AB+": { bg: "#f1cfa0", fg: "#5a3a10" }, "AB-": { bg: "#d3a56f", fg: "#3f2608" },
+        "O+": { bg: "#d9c6d2", fg: "#4a1a2a" }, "O-": { bg: "#a98a9a", fg: "#fff" },
+    };
+    const level = (on, min) => {
+    if (!(min > 0)) return "Adequate";
+    const r = on / min;
     return r < CRIT_RATIO ? "Critical" : r < 1 ? "Low" : "Adequate";
     };
+    const pctTxt = (p) => (p == null ? "—" : p < 1 ? `${p}%` : `${Math.round(p * 10) / 10}%`);
     const lvlCls = (l) => (l === "Critical" ? "crit" : l === "Low" ? "warn" : "ok");
     const prCls = (u) => {
     const v = String(u || "").toLowerCase();
@@ -79,6 +95,11 @@
     const [apptWhen, setApptWhen] = useState("");
     const [apptNotes, setApptNotes] = useState("");
     const [booking, setBooking] = useState(false);
+
+    // inline field messages (key = field); red message goes away when the field is edited
+    const [fe, setFe] = useState({});
+    const clearFe = (key) => setFe((p) => (p[key] ? { ...p, [key]: "" } : p));
+    const [invErrors, setInvErrors] = useState({}); // blood_type_id -> message under that inventory box
 
     // reports
     const [reportMonths, setReportMonths] = useState(6);
@@ -162,10 +183,12 @@
 
     const handleInventoryChange = async (blood_type_id, newValue) => {
         if (!isVerified) return;
-        if (!isValidUnits(newValue, { allowZero: true })) {
-        setError(UNIT_ERROR);
+        const bad = validate({ v: newValue }, { v: [required("Units"), unitsOrZero("Units")] }).v;
+        if (bad) {
+        setInvErrors((p) => ({ ...p, [blood_type_id]: bad }));
         return;
         }
+        setInvErrors((p) => ({ ...p, [blood_type_id]: "" }));
         setError("");
         try {
         const res = await api.put(`/bloodbanks/${profile.blood_bank_id}/inventory`, {
@@ -179,6 +202,33 @@
         }
         } catch (err) {
         setError(err.response?.data?.message || "Failed to update inventory.");
+        }
+    };
+
+    // change one group's minimum; value = null puts it back to the rarity-based default
+    const handleMinimumChange = async (item, value) => {
+        if (!isVerified) return;
+        const key = `min-${item.blood_type_id}`;
+        if (value !== null) {
+        if (String(value).trim() === "" || Number(value) === Number(item.min_units)) return;
+        const bad = validate({ v: value }, { v: [required("Minimum"), unitsOrZero("Minimum")] }).v;
+        if (bad) {
+            setInvErrors((p) => ({ ...p, [key]: bad }));
+            return;
+        }
+        }
+        setInvErrors((p) => ({ ...p, [key]: "" }));
+        setError("");
+        try {
+        await api.put(`/bloodbanks/${profile.blood_bank_id}/inventory/minimum`, {
+            blood_type_id: item.blood_type_id,
+            min_units: value,
+            changed_by: user.user_id,
+        });
+        setMessage(value === null ? `${gtxt(item.blood_type)} minimum reset to the default.` : `${gtxt(item.blood_type)} minimum updated.`);
+        loadAll(profile.blood_bank_id);
+        } catch (err) {
+        setError(err.response?.data?.message || "Failed to update the minimum.");
         }
     };
 
@@ -201,12 +251,18 @@
         e.preventDefault();
         setError("");
         setMessage("");
-        if (!selectedDonor) {
-        setError("Please select a donor from the search results.");
-        return;
+        const found = validate(
+        { donor: selectedDonor ? "ok" : "", units, donationStatus, remarks },
+        {
+            donor: [(v) => (v ? "" : donorSearch.trim() ? "Pick a donor from the search results." : "Donor is required.")],
+            units: [required("Units donated"), unitsRule("Units donated")],
+            donationStatus: [required("Status"), oneOf(["completed", "deferred", "cancelled"], "Choose a status from the list.")],
+            remarks: [maxLen(255, "Remarks")],
         }
-        if (!isValidUnits(units)) {
-        setError(UNIT_ERROR);
+        );
+        setFe((p) => ({ ...p, log_donor: found.donor || "", log_units: found.units || "", log_status: found.donationStatus || "", log_remarks: found.remarks || "" }));
+        if (hasErrors(found)) {
+        focusFirstError(e.currentTarget);
         return;
         }
         setLogging(true);
@@ -253,12 +309,20 @@
         e.preventDefault();
         setError("");
         setMessage("");
-        if (!apptDonor) {
-        setError("Please select a donor from the search results.");
-        return;
+        const found = validate(
+        { donor: apptDonor ? "ok" : "", when: apptWhen, notes: apptNotes },
+        {
+            donor: [(v) => (v ? "" : apptSearch.trim() ? "Pick a donor from the search results." : "Donor is required.")],
+            when: [
+            required("Date and time"),
+            (v) => (v && v < nowLocalMin ? "Date and time can't be in the past." : ""),
+            ],
+            notes: [maxLen(255, "Notes")],
         }
-        if (!apptWhen) {
-        setError("Pick a date and time.");
+        );
+        setFe((p) => ({ ...p, appt_donor: found.donor || "", appt_when: found.when || "", appt_notes: found.notes || "" }));
+        if (hasErrors(found)) {
+        focusFirstError(e.currentTarget);
         return;
         }
         setBooking(true);
@@ -302,17 +366,23 @@
     if (loading) {
         return (
         <div className="bbv9">
-            <p className="muted" style={{ padding: 24 }}>Loading...</p>
+            <p className="muted" style={{ padding: 24 }}><Loading label="Loading..." /></p>
         </div>
         );
     }
 
     // ---------- derived data ----------
     const stock = Object.fromEntries(inventory.map((i) => [i.blood_type, Number(i.units_available) || 0]));
+    const invOf = Object.fromEntries(inventory.map((i) => [i.blood_type, i]));
+    const minOf = (g) => Number(invOf[g]?.min_units) || 0;
+    // one shared scale for every bar, so the black minimum line sits further right for common groups
+    const barScale = Math.max(1, ...GROUPS.map((g) => minOf(g) * 1.5), ...GROUPS.map((g) => stock[g] || 0));
+    const barPct = (v) => `${Math.min(100, (v / barScale) * 100)}%`;
     const rows = GROUPS.map((g) => {
         const on = stock[g] || 0;
-        const lvl = level(on);
-        return { g, on, lvl, cls: lvlCls(lvl), w: Math.min(100, (on / (MIN_UNITS * 2)) * 100) };
+        const min = minOf(g);
+        const lvl = level(on, min);
+        return { g, on, min, pct: invOf[g]?.population_pct, custom: !!invOf[g]?.min_is_custom, lvl, cls: lvlCls(lvl) };
     });
     const total = rows.reduce((s, r) => s + r.on, 0);
     const shortRows = rows.filter((r) => r.lvl !== "Adequate");
@@ -360,7 +430,7 @@
         };
     });
     const maxCollected = Math.max(1, ...monthly.map((m) => m.collected));
-    const stockScale = Math.max(MIN_UNITS * 2, ...rows.map((r) => r.on));
+    const stockScale = barScale;
     const exportCsv = () => {
         const head = ["Month", "Collected (units)", "Completed donations", "Deferred", "Cancelled"];
         const body = monthly.map((m) => [m.label, formatUnits(m.collected), m.completed, m.deferred, m.cancelled]);
@@ -390,6 +460,7 @@
         { id: "inventory", label: "Inventory" },
         { id: "requests", label: "Requests", cnt: openReqs.length },
         { id: "compat", label: "Compatibility" },
+        { id: "analytics", label: "Predictive analytics" },
         { id: "appointments", label: "Appointments", cnt: upcoming.length },
         { h: "Records" },
         { id: "donors", label: "Donors", cnt: donors.length },
@@ -467,6 +538,14 @@
                 {message && <div className="msg ok">{message}</div>}
                 {error && <div className="msg err">{error}</div>}
 
+                {/* ============ REQUEST OUTLOOK (decision tree) ============ */}
+                {active === "analytics" && (
+                <section className="tab">
+                    <div className="page-h"><div><h1>Predictive analytics</h1><p>How much blood will be requested in the coming weeks, and how long your stock will last.</p></div></div>
+                    {profile?.blood_bank_id ? <DemandForecast bloodBankId={profile.blood_bank_id} /> : <Loading label="Loading..." />}
+                </section>
+                )}
+
                 {/* ============ DASHBOARD ============ */}
                 {active === "dashboard" && (
                 <section className="tab">
@@ -486,8 +565,18 @@
                         </div>
                         <div>
                         <div className="mix" role="img" aria-label="On hand by blood group">
+                            {rows.filter((r) => r.on > 0).map((r) => {
+                            const c = GROUP_COLORS[r.g] || { bg: "#fde8e4", fg: "#6a1018" };
+                            return (
+                                <span key={r.g} style={{ flex: `${r.on} 1 0`, background: c.bg, color: c.fg }} title={`${gtxt(r.g)}: ${formatUnits(r.on)} units`}>
+                                {r.on >= total * 0.08 ? gtxt(r.g) : ""}
+                                </span>
+                            );
+                            })}
+                        </div>
+                        <div className="mix-key">
                             {rows.filter((r) => r.on > 0).map((r) => (
-                            <span key={r.g} style={{ flex: `${r.on} 1 0` }}>{r.on >= total * 0.08 ? gtxt(r.g) : ""}</span>
+                            <span key={r.g}><i className="sw" style={{ background: (GROUP_COLORS[r.g] || {}).bg }} />{gtxt(r.g)} ({formatUnits(r.on)})</span>
                             ))}
                         </div>
                         <div className="mix-l">On hand by blood group, in proportion</div>
@@ -518,19 +607,20 @@
 
                     <div className="panel">
                     <div className="panel-h">
-                        <h3>Stock by blood group<span className="sub">Minimum level: {MIN_UNITS} units per group</span></h3>
+                        <h3>Stock by blood group<span className="sub">Minimum per group is based on how common the blood type is</span></h3>
                         <div className="actions"><button type="button" className="link" onClick={() => go("inventory")}>Open inventory</button></div>
                     </div>
                     <div className="tw">
                         <table>
-                        <thead><tr><th>Group</th><th className="r">On hand</th><th className="r">Minimum</th><th>Stock level</th><th>Status</th></tr></thead>
+                        <thead><tr><th>Group</th><th className="r">Population</th><th className="r">On hand</th><th className="r">Minimum</th><th>Stock level</th><th>Status</th></tr></thead>
                         <tbody>
                             {rows.map((r) => (
                             <tr key={r.g}>
                                 <td><b className="grp">{gtxt(r.g)}</b></td>
+                                <td className="r num muted">{pctTxt(r.pct)}</td>
                                 <td className="r num"><b>{formatUnits(r.on)}</b></td>
-                                <td className="r num">{MIN_UNITS}</td>
-                                <td><div className={`lvl ${r.cls === "ok" ? "" : r.cls}`}><i style={{ width: `${r.w}%` }} /><b /></div></td>
+                                <td className="r num">{formatUnits(r.min)}{r.custom ? " *" : ""}</td>
+                                <td><div className={`lvl ${r.cls === "ok" ? "" : r.cls}`} title={`Black line = minimum (${formatUnits(r.min)})`}><i style={{ width: barPct(r.on) }} /><b style={{ left: barPct(r.min) }} /></div></td>
                                 <td><span className={`st ${r.cls}`}>{r.lvl}</span></td>
                             </tr>
                             ))}
@@ -587,7 +677,7 @@
                 {active === "inventory" && (
                 <section className="tab">
                     <div className="page-h">
-                    <div><h1>Inventory</h1><p>Blood on hand by group. Edit a number and click outside the box to save.</p></div>
+                    <div><h1>Inventory</h1><p>Blood on hand and the minimum to keep, by group. Edit a number and click outside the box to save.</p></div>
                     </div>
                     {!isVerified && (
                     <div className="msg err">Inventory is read-only until an admin verifies your blood bank (status: {profile?.verified_status}).</div>
@@ -595,15 +685,17 @@
                     <div className="panel">
                     <div className="tw">
                         <table>
-                        <thead><tr><th>Blood group</th><th className="r">Units available</th><th>Stock level</th><th>Status</th><th>Last updated</th></tr></thead>
+                        <thead><tr><th>Blood group</th><th className="r">Population</th><th className="r">Units available</th><th className="r">Minimum</th><th>Stock level</th><th>Status</th><th>Last updated</th></tr></thead>
                         <tbody>
                             {inventory.map((item) => {
                             const on = Number(item.units_available) || 0;
-                            const lvl = level(on);
+                            const min = Number(item.min_units) || 0;
+                            const lvl = level(on, min);
                             const c = lvlCls(lvl);
                             return (
-                                <tr key={`${item.blood_type_id}-${item.units_available}`}>
+                                <tr key={`${item.blood_type_id}-${item.units_available}-${item.min_units}`}>
                                 <td><b className="grp">{gtxt(item.blood_type)}</b></td>
+                                <td className="r num muted">{pctTxt(item.population_pct)}</td>
                                 <td className="r">
                                     <input
                                     className="in"
@@ -613,10 +705,38 @@
                                     style={{ width: 90 }}
                                     disabled={!isVerified}
                                     defaultValue={formatUnits(item.units_available)}
+                                    aria-invalid={!!invErrors[item.blood_type_id]}
+                                    aria-describedby={`err-inv-${item.blood_type_id}`}
+                                    onChange={() => setInvErrors((p) => (p[item.blood_type_id] ? { ...p, [item.blood_type_id]: "" } : p))}
                                     onBlur={(e) => handleInventoryChange(item.blood_type_id, e.target.value)}
                                     />
+                                    <FieldError id={`err-inv-${item.blood_type_id}`} message={invErrors[item.blood_type_id]} />
                                 </td>
-                                <td><div className={`lvl ${c === "ok" ? "" : c}`}><i style={{ width: `${Math.min(100, (on / (MIN_UNITS * 2)) * 100)}%` }} /><b /></div></td>
+                                <td className="r">
+                                    <input
+                                    className="in"
+                                    type="number"
+                                    min="0"
+                                    step="0.5"
+                                    style={{ width: 80 }}
+                                    disabled={!isVerified}
+                                    defaultValue={formatUnits(min)}
+                                    aria-label={`Minimum for ${item.blood_type}`}
+                                    aria-invalid={!!invErrors[`min-${item.blood_type_id}`]}
+                                    aria-describedby={`err-min-${item.blood_type_id}`}
+                                    onChange={() => setInvErrors((p) => (p[`min-${item.blood_type_id}`] ? { ...p, [`min-${item.blood_type_id}`]: "" } : p))}
+                                    onBlur={(e) => handleMinimumChange(item, e.target.value)}
+                                    />
+                                    <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+                                    {item.min_is_custom ? (
+                                        <button type="button" className="link" style={{ fontSize: 11 }} disabled={!isVerified} onClick={() => handleMinimumChange(item, null)}>
+                                        Reset to {formatUnits(item.default_min_units)}
+                                        </button>
+                                    ) : "Default by rarity"}
+                                    </div>
+                                    <FieldError id={`err-min-${item.blood_type_id}`} message={invErrors[`min-${item.blood_type_id}`]} />
+                                </td>
+                                <td><div className={`lvl ${c === "ok" ? "" : c}`} title={`Black line = minimum (${formatUnits(min)})`}><i style={{ width: barPct(on) }} /><b style={{ left: barPct(min) }} /></div></td>
                                 <td><span className={`st ${c}`}>{lvl}</span></td>
                                 <td>{item.last_updated || "—"}</td>
                                 </tr>
@@ -625,7 +745,7 @@
                         </tbody>
                         </table>
                     </div>
-                    <div className="foot-note"><span>{UNIT_HINT}</span></div>
+                    <div className="foot-note"><span>{UNIT_HINT} The black line on each bar is that group&apos;s minimum. Default minimums follow how common each blood type is in the Philippines (O+ most common, Rh-negative under 1%); O− keeps a little extra because it can be given to anyone in an emergency.</span></div>
                     </div>
                 </section>
                 )}
@@ -636,6 +756,11 @@
                     <div className="page-h">
                     <div><h1>Blood requests</h1><p>Requests posted by patients and hospitals. Donor matching is handled by the system.</p></div>
                     </div>
+                    {profile?.verified_status === "verified" ? (
+                        <CriticalReview requests={requests} onReviewed={() => loadAll(profile.blood_bank_id)} />
+                    ) : (
+                        <div className="msg err">Only a verified blood bank can confirm emergency requests.</div>
+                    )}
                     <div className="panel">
                     <div className="tabs">
                         {reqTabs.map((t) => (
@@ -691,7 +816,7 @@
                             <tbody>
                             {donorsFor(recipient).map((d) => {
                                 const on = stock[d] || 0;
-                                const lvl = level(on);
+                                const lvl = level(on, minOf(d));
                                 return (
                                 <tr key={d}>
                                     <td><b className="grp">{gtxt(d)}</b></td>
@@ -784,10 +909,11 @@
 
                     <div className="panel">
                         <div className="panel-h"><h3>Book an appointment</h3></div>
-                        <form className="form-narrow" onSubmit={handleBook}>
+                        <form className="form-narrow" onSubmit={handleBook} noValidate>
                         <div className="search-wrap">
                             <label>Search donor (name or email)</label>
-                            <input className="in" type="text" value={apptSearch} onChange={(e) => handleApptSearch(e.target.value)} placeholder="Start typing a name or email..." disabled={!isVerified} />
+                            <input className="in" type="text" value={apptSearch} onChange={(e) => { handleApptSearch(e.target.value); clearFe("appt_donor"); }} placeholder="Start typing a name or email..." disabled={!isVerified} aria-invalid={!!fe.appt_donor} aria-describedby="err-appt-donor" />
+                            <FieldError id="err-appt-donor" message={fe.appt_donor} />
                             {apptResults.length > 0 && (
                             <div className="dd">
                                 {apptResults.map((d) => (
@@ -800,7 +926,7 @@
                                     setApptResults([]);
                                     }}
                                 >
-                                    {d.full_name} — {d.email} — {d.blood_type}
+                                    {d.full_name} — {d.email} — {gtxt(d.blood_type)}
                                 </button>
                                 ))}
                             </div>
@@ -808,11 +934,13 @@
                         </div>
                         <div>
                             <label>Date and time</label>
-                            <input className="in" type="datetime-local" min={nowLocalMin} value={apptWhen} onChange={(e) => setApptWhen(e.target.value)} disabled={!isVerified} />
+                            <input className="in" type="datetime-local" min={nowLocalMin} value={apptWhen} onChange={(e) => { setApptWhen(e.target.value); clearFe("appt_when"); }} disabled={!isVerified} aria-invalid={!!fe.appt_when} aria-describedby="err-appt-when" />
+                            <FieldError id="err-appt-when" message={fe.appt_when} />
                         </div>
                         <div>
                             <label>Notes (optional)</label>
-                            <input className="in" type="text" maxLength={255} value={apptNotes} onChange={(e) => setApptNotes(e.target.value)} disabled={!isVerified} />
+                            <input className="in" type="text" maxLength={255} value={apptNotes} onChange={(e) => { setApptNotes(e.target.value); clearFe("appt_notes"); }} disabled={!isVerified} aria-invalid={!!fe.appt_notes} aria-describedby="err-appt-notes" />
+                            <FieldError id="err-appt-notes" message={fe.appt_notes} />
                         </div>
                         <div>
                             <button type="submit" className="btn pri" disabled={booking || !isVerified}>{booking ? "Booking..." : "Book appointment"}</button>
@@ -867,10 +995,11 @@
                 <section className="tab">
                     <div className="page-h"><div><h1>Log a donation</h1><p>Record a donation received at {profile?.bank_name}.</p></div></div>
                     <div className="panel">
-                    <form className="form-narrow" onSubmit={handleLogDonation}>
+                    <form className="form-narrow" onSubmit={handleLogDonation} noValidate>
                         <div className="search-wrap">
                         <label>Search donor (name or email)</label>
-                        <input className="in" type="text" value={donorSearch} onChange={(e) => handleDonorSearch(e.target.value)} placeholder="Start typing a name or email..." />
+                        <input className="in" type="text" value={donorSearch} onChange={(e) => { handleDonorSearch(e.target.value); clearFe("log_donor"); }} placeholder="Start typing a name or email..." aria-invalid={!!fe.log_donor} aria-describedby="err-log-donor" />
+                        <FieldError id="err-log-donor" message={fe.log_donor} />
                         {donorResults.length > 0 && (
                             <div className="dd">
                             {donorResults.map((d) => (
@@ -883,29 +1012,32 @@
                                     setDonorResults([]);
                                 }}
                                 >
-                                {d.full_name} — {d.email} — {d.blood_type}
+                                {d.full_name} — {d.email} — {gtxt(d.blood_type)}
                                 </button>
                             ))}
                             </div>
                         )}
                         </div>
-                        {selectedDonor && <div className="muted">Selected: <b>{selectedDonor.full_name}</b> ({selectedDonor.blood_type})</div>}
+                        {selectedDonor && <div className="muted">Selected: <b>{selectedDonor.full_name}</b> ({gtxt(selectedDonor.blood_type)})</div>}
                         <div>
                         <label>Units donated</label>
-                        <input className="in" type="number" min="0.5" step="0.5" value={units} onChange={(e) => setUnits(e.target.value)} />
+                        <input className="in" type="number" min="0.5" step="0.5" value={units} onChange={(e) => { setUnits(e.target.value); clearFe("log_units"); }} aria-invalid={!!fe.log_units} aria-describedby="err-log-units" />
+                        <FieldError id="err-log-units" message={fe.log_units} />
                         <div className="muted" style={{ marginTop: 4 }}>{UNIT_HINT}</div>
                         </div>
                         <div>
                         <label>Status</label>
-                        <select className="in sel" value={donationStatus} onChange={(e) => setDonationStatus(e.target.value)}>
+                        <select className="in sel" value={donationStatus} onChange={(e) => { setDonationStatus(e.target.value); clearFe("log_status"); }} aria-invalid={!!fe.log_status} aria-describedby="err-log-status">
                             <option value="completed">Completed</option>
                             <option value="deferred">Deferred</option>
                             <option value="cancelled">Cancelled</option>
                         </select>
+                        <FieldError id="err-log-status" message={fe.log_status} />
                         </div>
                         <div>
                         <label>Remarks (optional)</label>
-                        <input className="in" type="text" value={remarks} onChange={(e) => setRemarks(e.target.value)} />
+                        <input className="in" type="text" value={remarks} onChange={(e) => { setRemarks(e.target.value); clearFe("log_remarks"); }} aria-invalid={!!fe.log_remarks} aria-describedby="err-log-remarks" />
+                        <FieldError id="err-log-remarks" message={fe.log_remarks} />
                         </div>
                         <div>
                         <button type="submit" className="btn pri" disabled={logging}>{logging ? "Logging..." : "Log donation"}</button>
@@ -949,7 +1081,7 @@
                         <table>
                         <thead><tr><th>When</th><th>Group</th><th className="r">Old</th><th className="r">New</th><th className="r">Change</th><th>Changed by</th></tr></thead>
                         <tbody>
-                            {auditLoading && <tr><td colSpan="6" className="empty">Loading history...</td></tr>}
+                            {auditLoading && <tr><td colSpan="6" className="empty"><Loading label="Loading history..." /></td></tr>}
                             {!auditLoading && auditLog.length === 0 && <tr><td colSpan="6" className="empty">No inventory changes recorded yet.</td></tr>}
                             {!auditLoading && auditLog.map((a) => (
                             <tr key={a.audit_id}>
@@ -1002,11 +1134,12 @@
                     </div>
 
                     <div className="panel">
-                        <div className="panel-h"><h3>On hand against minimum</h3><span className="muted">Minimum: {MIN_UNITS} units per group</span></div>
+                        <div className="panel-h"><h3>On hand against minimum</h3><span className="muted">Black line = each group&apos;s minimum</span></div>
                         <div className="bb-bars">
                         {rows.map((r) => (
                             <div className="bb-bar" key={r.g}>
-                            <div className="bb-col">
+                            <div className="bb-col" style={{ position: "relative" }}>
+                                <span className="bb-min" style={{ bottom: `${(r.min / stockScale) * 100}%` }} title={`Minimum ${formatUnits(r.min)}`} />
                                 <div className={`bb-stack ${r.cls}`} style={{ height: `${(r.on / stockScale) * 100}%` }}>
                                 <span className="v">{formatUnits(r.on)}</span>
                                 </div>
@@ -1020,7 +1153,7 @@
                         <span><i className="sw" style={{ background: "var(--amber)" }} />Low</span>
                         <span><i className="sw" style={{ background: "var(--alert)" }} />Critical</span>
                         </div>
-                        <div className="foot-note"><span>Below {MIN_UNITS} is Low; below {MIN_UNITS * CRIT_RATIO} is Critical.</span></div>
+                        <div className="foot-note"><span>Below the group&apos;s minimum is Low; below half of it is Critical.</span></div>
                     </div>
                     </div>
 
@@ -1091,6 +1224,10 @@
             cancelLabel="Not yet"
             onCancel={() => setCompleteAppt(null)}
             onConfirm={() => {
+            if (String(completeUnits).trim() === "") {
+                setCompleteErr("Units collected is required.");
+                return;
+            }
             if (!isValidUnits(completeUnits)) {
                 setCompleteErr(UNIT_ERROR);
                 return;
@@ -1112,6 +1249,7 @@
                 min="0.5"
                 step="0.5"
                 value={completeUnits}
+                aria-invalid={!!completeErr}
                 onChange={(e) => { setCompleteUnits(e.target.value); setCompleteErr(""); }}
                 style={{ width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 14, fontFamily: "inherit", border: "1.5px solid #ecd9db", borderRadius: 10 }}
             />

@@ -2,6 +2,9 @@
     import api from "../api";
     import { formatUnits, UNIT_ML } from "./units";
     import "./memberProfile.css";
+    import Loading from "./Loading";
+    import FieldError from "./FieldError";
+    import { validate, hasErrors, notFuture, maxAge, numberBetween, oneOf, focusFirstError } from "../validation";
 
     // Profile page for a member (one account = donor + requester).
     //   <MemberProfile
@@ -76,6 +79,11 @@
     const [message, setMessage] = useState("");
     const [toggling, setToggling] = useState(false);
     const [extra, setExtra] = useState({ date_of_birth: "", gender: "", weight_kg: "" });
+    const [extraErrors, setExtraErrors] = useState({});
+    const setExtraField = (key, value) => {
+        setExtra((p) => ({ ...p, [key]: value }));
+        setExtraErrors((p) => (p[key] ? { ...p, [key]: "" } : p)); // red message goes away when edited
+    };
     const [savingExtra, setSavingExtra] = useState(false);
 
     const load = useCallback(async () => {
@@ -123,8 +131,27 @@
         Object.entries(extra).forEach(([k, v]) => {
         if (String(v).trim() !== "") payload[k] = v;
         });
+        // fields shown in this form (the same ones the inputs below are rendered for)
+        const shown = [
+        !data?.user?.date_of_birth && "date_of_birth",
+        !data?.user?.gender && "gender",
+        data?.donor && data.donor.weight_kg == null && "weight_kg",
+        ].filter(Boolean);
+        let found;
         if (Object.keys(payload).length === 0) {
-        setError("Fill in at least one field to save.");
+        // nothing filled in: every field in the form says it is required
+        found = {};
+        shown.forEach((k) => { found[k] = "This field is required."; });
+        } else {
+        found = validate(extra, {
+            date_of_birth: [notFuture("Date of birth"), maxAge(120, "Date of birth")],
+            gender: [oneOf(Object.keys(GENDER_LABEL), "Choose a gender from the list.")],
+            weight_kg: [numberBetween(30, 300, "Weight")],
+        });
+        }
+        setExtraErrors(found);
+        if (hasErrors(found)) {
+        focusFirstError(e.currentTarget);
         return;
         }
         setSavingExtra(true);
@@ -143,7 +170,7 @@
         }
     };
 
-    if (loading) return <div className="panel"><p className="mp-empty">Loading your profile...</p></div>;
+    if (loading) return <div className="panel"><p className="mp-empty"><Loading label="Loading your profile..." /></p></div>;
     if (!data) return <div className="msg err">{error || "Failed to load your profile."}</div>;
 
     const { user: u, donor, eligibility_checks: checks, requests, completeness } = data;
@@ -262,7 +289,7 @@
                 <h3>Finish your profile</h3>
                 <span className="mp-sub">Used to check if you can donate</span>
             </div>
-            <form className="panel-b mp-extra" onSubmit={saveExtra}>
+            <form className="panel-b mp-extra" onSubmit={saveExtra} noValidate>
                 {needDob && (
                 <div>
                     <label htmlFor="mp-dob">Date of birth</label>
@@ -272,8 +299,11 @@
                     className="in"
                     max={new Date().toISOString().slice(0, 10)}
                     value={extra.date_of_birth}
-                    onChange={(e) => setExtra({ ...extra, date_of_birth: e.target.value })}
+                    onChange={(e) => setExtraField("date_of_birth", e.target.value)}
+                    aria-invalid={!!extraErrors.date_of_birth}
+                    aria-describedby="err-mp-dob"
                     />
+                    <FieldError id="err-mp-dob" message={extraErrors.date_of_birth} />
                 </div>
                 )}
                 {needGender && (
@@ -283,13 +313,16 @@
                     id="mp-gender"
                     className="in"
                     value={extra.gender}
-                    onChange={(e) => setExtra({ ...extra, gender: e.target.value })}
+                    onChange={(e) => setExtraField("gender", e.target.value)}
+                    aria-invalid={!!extraErrors.gender}
+                    aria-describedby="err-mp-gender"
                     >
                     <option value="">Select</option>
                     {Object.entries(GENDER_LABEL).map(([v, l]) => (
                         <option key={v} value={v}>{l}</option>
                     ))}
                     </select>
+                    <FieldError id="err-mp-gender" message={extraErrors.gender} />
                 </div>
                 )}
                 {needWeight && (
@@ -304,8 +337,11 @@
                     step="0.1"
                     placeholder="e.g. 58"
                     value={extra.weight_kg}
-                    onChange={(e) => setExtra({ ...extra, weight_kg: e.target.value })}
+                    onChange={(e) => setExtraField("weight_kg", e.target.value)}
+                    aria-invalid={!!extraErrors.weight_kg}
+                    aria-describedby="err-mp-weight"
                     />
+                    <FieldError id="err-mp-weight" message={extraErrors.weight_kg} />
                 </div>
                 )}
                 <div>

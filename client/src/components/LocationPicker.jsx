@@ -1,3 +1,4 @@
+import "./loading.css";
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -10,10 +11,10 @@ const RED = "#c62828";
 // Your own list of places (hospitals, blood banks, towns).
 // These show first when you type in the search box.
 // The coordinates below are APPROXIMATE examples only: replace them with the real ones.
-const PLACES = [
-  { name: "Baliuag District Hospital", area: "Baliuag, Bulacan", lat: 14.9547, lng: 120.9006 },
-  // { name: "Hospital Name", area: "Town, Province", lat: 0.0, lng: 0.0 },
-];
+// (The old "Baliuag District Hospital" template entry was removed: it is in Bulacan, not your area.)
+// Add your own like this, with REAL coordinates:
+// { name: "Hospital Name", area: "Town, Province", lat: 0.0, lng: 0.0 },
+const PLACES = [];
 
 // distance in km between two coordinates (computed locally)
 const distKm = (aLat, aLng, bLat, bLng) => {
@@ -240,6 +241,11 @@ function LocationPicker({ latitude, longitude, onChange, onAddress, height = 380
 
   // Enter / Search button: pick the first suggestion
   const runSearch = () => {
+    // empty search: say so right under the search box
+    if (!query.trim()) {
+      setMsg("Type a place to search.");
+      return;
+    }
     if (matches[0]) return pickPlace(matches[0]);
     if (remote[0]) return pickRemote(remote[0]);
     setShowList(true);
@@ -345,7 +351,7 @@ function LocationPicker({ latitude, longitude, onChange, onAddress, height = 380
               onClick={runSearch}
               style={{ border: "none", background: RED, color: "#fff", borderRadius: 8, padding: "7px 12px", fontSize: 13, cursor: "pointer" }}
             >
-              {searching ? "..." : "Search"}
+              {searching ? <span className="bl-spin sm" style={{ borderColor: "rgba(255,255,255,.4)", borderTopColor: "#fff" }} /> : "Search"}
             </button>
             <button
               type="button"
@@ -380,7 +386,7 @@ function LocationPicker({ latitude, longitude, onChange, onAddress, height = 380
                 </button>
               ))}
               {searching && !remote.length && matches.length === 0 && (
-                <p style={noteStyle}>Naghahanap...</p>
+                <p style={{ ...noteStyle, display: "flex", alignItems: "center", gap: 8 }}><span className="bl-spin sm" />Naghahanap...</p>
               )}
               {!searching && remoteMsg && !remote.length && <p style={noteStyle}>{remoteMsg}</p>}
               {!searching && q.length < 2 && matches.length === 0 && (

@@ -1,4 +1,4 @@
-    /* =====================================================
+/* =====================================================
     CONFIRM DIALOG ("Are you sure?")
     Rendered into .db-page by ConfirmDialog.jsx so it keeps the portal's colors
     ===================================================== */
@@ -65,39 +65,65 @@
     color: #56565e;
     }
 
-    .cf-actions {
+    .cf-dialog .cf-message { margin: 0 0 24px; }
+
+.cf-dialog .cf-actions {
     display: flex;
     justify-content: center;
-    gap: 10px;
-    }
+    gap: 12px;
+    margin: 0;
+}
 
-    .cf-confirm {
-    padding: 11px 20px;
-    border: none;
+/* both buttons share one size and shape */
+.cf-dialog .cf-actions .cf-btn {
+    flex: 1 1 0;
+    min-width: 120px;
+    max-width: 180px;
+    padding: 12px 18px;
     border-radius: 10px;
     font-family: inherit;
     font-size: 14px;
     font-weight: 700;
-    color: #fff;
+    line-height: 1.2;
     cursor: pointer;
-    transition: filter 0.12s ease, transform 0.12s ease;
-    }
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease;
+}
 
-    .cf-confirm-danger {
-    background: linear-gradient(135deg, #d9363e, #a3162a);
-    }
+/* "No, go back": calm white button with a soft grey border */
+.cf-dialog .cf-actions .cf-cancel {
+    border: 1.5px solid #d9dbe1;
+    background: #fff;
+    color: #3a3b42;
+}
+.cf-dialog .cf-actions .cf-cancel:hover {
+    background: #f4f5f8;
+    border-color: #b9bcc6;
+}
 
-    .cf-confirm:hover {
-    filter: brightness(1.08);
+/* "Yes, disable": strong red, the one you notice */
+.cf-dialog .cf-actions .cf-confirm {
+    border: 1.5px solid transparent;
+    color: #fff;
+}
+.cf-dialog .cf-actions .cf-confirm-danger {
+    background: linear-gradient(135deg, #e0414a, #a3162a);
+    box-shadow: 0 6px 14px -6px rgba(163, 22, 42, 0.65);
+}
+.cf-dialog .cf-actions .cf-confirm-primary {
+    background: linear-gradient(135deg, #9b1522, #6f0d18);
+    box-shadow: 0 6px 14px -6px rgba(111, 13, 24, 0.65);
+}
+.cf-dialog .cf-actions .cf-confirm:hover {
+    filter: brightness(1.07);
     transform: translateY(-1px);
-    }
+}
 
-    .cf-confirm:focus-visible {
-    outline: 3px solid rgba(198, 40, 40, 0.4);
+.cf-dialog .cf-actions .cf-btn:focus-visible {
+    outline: 3px solid rgba(198, 40, 40, 0.35);
     outline-offset: 2px;
-    }
+}
 
-    @keyframes cf-fade {
+@keyframes cf-fade {
     from { opacity: 0; }
     to { opacity: 1; }
     }
@@ -108,10 +134,11 @@
     }
 
     @media (max-width: 480px) {
-    .cf-actions {
+    .cf-dialog .cf-actions {
         flex-direction: column-reverse;
     }
-    .cf-actions > button {
+    .cf-dialog .cf-actions .cf-btn {
+        max-width: none;
         width: 100%;
     }
     }

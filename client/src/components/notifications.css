@@ -68,3 +68,10 @@
 @media (max-width: 900px) {
   .nb-dropdown { position: fixed; left: 12px; right: 12px; top: 58px; width: auto; max-width: none; }
 }
+/* SPRINT 2 FIX: alert styling for emergency / critical notifications */
+.nb-emergency, .db-notif-emergency { border-left-color: var(--alert, #c0262d) !important; background: #fff3f3; }
+.alert-tag {
+  display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 3px;
+  background: var(--alert, #c0262d); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  line-height: 16px; vertical-align: 1px;
+}
