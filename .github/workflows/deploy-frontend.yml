@@ -1,0 +1,68 @@
+# Builds the React frontend (client/) and publishes it on GitHub Pages.
+# Runs on every push to main that changes the frontend, or by hand from the Actions tab.
+#
+# One-time setup in the repository on GitHub:
+#   1. Settings > Pages > Build and deployment > Source: "GitHub Actions"
+#   2. Settings > Secrets and variables > Actions > Variables > New repository variable
+#        Name:  BLOODLINK_API_URL
+#        Value: the backend address from Railway, e.g. https://bloodlink-api.up.railway.app
+name: Deploy frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["client/**", ".github/workflows/deploy-frontend.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Check that the backend address is set
+        run: |
+          if [ -z "${{ vars.BLOODLINK_API_URL }}" ]; then
+            echo "::error::Add the repository variable BLOODLINK_API_URL (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_API_URL: ${{ vars.BLOODLINK_API_URL }}
+          VITE_BASE: /${{ github.event.repository.name }}/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: client/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
