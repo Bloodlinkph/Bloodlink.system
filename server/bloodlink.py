@@ -51,9 +51,11 @@ def db_connect():
     # defaults match the old setup; override with environment variables in production
     return mariadb.connect(
         host=os.environ.get("BLOODLINK_DB_HOST", "localhost"),
+        port=int(os.environ.get("BLOODLINK_DB_PORT", "3306")),
         user=os.environ.get("BLOODLINK_DB_USER", "root"),
         password=os.environ.get("BLOODLINK_DB_PASSWORD", ""),
-        database=os.environ.get("BLOODLINK_DB_NAME", "bloodlink_db")
+        database=os.environ.get("BLOODLINK_DB_NAME", "bloodlink_db"),
+        connect_timeout=10,
     )
 
 
@@ -4899,6 +4901,18 @@ def demand_forecast():
             conn.close()
 
 
+
+
+# open the server address in a browser to check that the backend is running
+@app.route("/", methods=["GET"])
+def health():
+    try:
+        conn = db_connect()
+        conn.close()
+        db = "connected"
+    except mariadb.Error:
+        db = "NOT connected (check the BLOODLINK_DB_* settings)"
+    return jsonify({"service": "BloodLink API", "status": "running", "database": db}), 200
 
 
 if __name__ == "__main__":
