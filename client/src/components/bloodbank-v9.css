@@ -372,8 +372,8 @@
   .bbv9 .supply .big-row{ align-items: flex-end; flex-wrap: wrap; }
   .bbv9 .supply .cover{ margin-left: auto; text-align: right; color: rgba(255, 255, 255, .72); font-size: 12px; line-height: 1.35; max-width: 150px; }
   .bbv9 .supply .cover b{ display: block; font-size: 24px; font-weight: 600; letter-spacing: -.02em; color: #fff; }
-  .bbv9 .tw.tall{ max-height: calc(100vh - 330px); overflow: auto; }
-  .bbv9 .tw.tall th{ position: sticky; top: 0; z-index: 2; box-shadow: 0 1px 0 var(--line); }
+  /* long tables (donors, donation history, inventory history) run the full page length; the page scrolls instead of the table */
+  .bbv9 .tw.tall{ max-height: none; overflow-x: auto; overflow-y: visible; }
   .bbv9.compact td{ padding-top: 4px; padding-bottom: 4px; }
   .bbv9.compact th{ padding-top: 6px; padding-bottom: 6px; }
   .bbv9.compact .btn.sm{ height: 22px; }
