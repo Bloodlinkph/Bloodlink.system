@@ -141,39 +141,6 @@ function SupplyDemandBars({ groups }) {
   );
 }
 
-// ---------- forecast vs actual on past weeks ----------
-function BacktestChart({ labels, actual, predicted }) {
-  const W = 560, H = 210, L = 34, R = 12, T = 12, B = 28;
-  const n = actual.length;
-  const yMax = niceMax(Math.max(...actual, ...predicted.filter((v) => v !== null)));
-  const x = (i) => L + (i * (W - L - R)) / Math.max(1, n - 1);
-  const y = (v) => T + (H - T - B) * (1 - v / yMax);
-  const ticks = [0, 1, 2, 3, 4].map((k) => (yMax * k) / 4);
-  const first = predicted.findIndex((v) => v !== null);
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Actual weekly requests compared with what the forecast predicted for the same weeks">
-      {ticks.map((t) => (
-        <g key={t}>
-          <line x1={L} x2={W - R} y1={y(t)} y2={y(t)} stroke={GRID} />
-          <text x={L - 6} y={y(t) + 4} textAnchor="end" fontSize="11" fill={MUTED}>{formatUnits(Math.round(t * 2) / 2)}</text>
-        </g>
-      ))}
-      {first > 0 && <rect x={L} y={T} width={x(first) - L - 6} height={H - T - B} fill="#f7f8fa" />}
-      {first > 0 && <text x={L + 6} y={T + 12} fontSize="10.5" fill={MUTED}>learning weeks</text>}
-      {predicted.map((v, i) => v !== null && (
-        <line key={i} x1={x(i)} x2={x(i)} y1={y(v)} y2={y(actual[i])} stroke="#f0b4ba" strokeWidth="5" strokeLinecap="round">
-          <title>{`${shortDate(labels[i])}: predicted ${formatUnits(v)}, actual ${formatUnits(actual[i])}, off by ${formatUnits(Math.round(Math.abs(v - actual[i]) * 10) / 10)}`}</title>
-        </line>
-      ))}
-      <path d={pathOf(actual.map((v, i) => [i, v]), x, y)} fill="none" stroke={RED} strokeWidth="2" />
-      <path d={pathOf(predicted.map((v, i) => [i, v]), x, y)} fill="none" stroke={PINK} strokeWidth="2" strokeDasharray="5 4" />
-      {labels.map((d, i) => i % 3 === 0 && (
-        <text key={d} x={x(i)} y={H - 8} textAnchor="middle" fontSize="11" fill={MUTED}>{shortDate(d)}</text>
-      ))}
-    </svg>
-  );
-}
-
 export default function DemandForecast({ bloodBankId = null }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -212,8 +179,6 @@ export default function DemandForecast({ bloodBankId = null }) {
   const series = sel || data.total;
   const labels = [...data.week_labels, ...data.forecast_labels];
   const change = data.total.last4w ? Math.round(((data.total.next4w - data.total.last4w) / data.total.last4w) * 100) : null;
-  const baseline = data.comparison.find((c) => c.baseline);
-  const used = data.comparison.find((c) => c.used);
 
   return (
     <div>
@@ -281,61 +246,7 @@ export default function DemandForecast({ bloodBankId = null }) {
         </div>
       </div>
 
-      {/* 4 + 5. ACCURACY AND METHOD COMPARISON */}
-      <div className="ft-grid">
-        <div className="panel" style={{ margin: 0 }}>
-          <div className="panel-h"><h3>How accurate is the forecast?<span className="sub">Tested on {acc.weeks_tested} past weeks</span></h3></div>
-          <Legend items={[[RED, "Actual requests"], [PINK, "What the forecast predicted", true], ["#f0b4ba", "Error"]]} />
-          <div style={{ padding: "0 10px" }}>
-            <BacktestChart labels={data.week_labels} actual={data.total.history} predicted={data.total.predicted_past} />
-          </div>
-          <div className="ft-kpis" style={{ margin: "8px 12px" }}>
-            <div className="ft-kpi"><div className="k">MAE</div><div className="v">{formatUnits(Math.round(acc.mae * 10) / 10)} units</div><div className="k">average miss per week</div></div>
-            <div className="ft-kpi"><div className="k">MAPE</div><div className="v">{acc.mape === null ? "—" : `${acc.mape}%`}</div><div className="k">average miss in %</div></div>
-          </div>
-          <div style={{ fontSize: 12.5, color: "#5b6675", padding: "0 14px 12px", lineHeight: 1.6 }}>
-            For each past week, the method was given only the weeks before it and asked to predict that week.
-            On average it was off by <b>{formatUnits(Math.round(acc.mae * 10) / 10)} unit(s)</b> per week.
-            MAPE skips weeks with no requests, and it gets large when a week has only 1 or 2 requests.
-          </div>
-        </div>
-
-        <div className="panel" style={{ margin: 0 }}>
-          <div className="panel-h"><h3>Which method is used, and why<span className="sub">Lower error is better</span></h3></div>
-          <div className="tw">
-            <table>
-              <thead><tr><th>Method</th><th>How it predicts next week</th><th className="r">MAE</th><th className="r">MAPE</th></tr></thead>
-              <tbody>
-                {data.comparison.map((c) => (
-                  <tr key={c.method} style={c.used ? { background: "#eef8f1" } : undefined}>
-                    <td>
-                      <b>{c.label}</b>
-                      {c.used && <span className="st ok" style={{ marginLeft: 8 }}>Used</span>}
-                      {c.baseline && <span className="st" style={{ marginLeft: 8 }}>Baseline</span>}
-                    </td>
-                    <td className="wrap" style={{ fontSize: 12.5 }}>
-                      {c.method === "naive" && "Copies the last week"}
-                      {c.method === "average" && `Average of the last ${m.avg_weeks} weeks`}
-                      {c.method === "trend" && `Average of the last ${m.avg_weeks} weeks + trend line (last ${m.trend_weeks} weeks)`}
-                    </td>
-                    <td className="r num">{formatUnits(Math.round(c.mae * 10) / 10)}</td>
-                    <td className="r num">{c.mape === null ? "—" : `${c.mape}%`}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div style={{ fontSize: 12.5, color: "#5b6675", padding: "10px 14px 12px", lineHeight: 1.6 }}>
-            The system tests every method on the same past weeks. Of the two that can plan ahead, it uses the one with the lower MAE.
-            <b> {baseline.label}</b> is the baseline: it can't plan more than one week ahead, so it is only the bar to beat.
-            {data.beats_baseline
-              ? <> <b>{used.label}</b> beats the baseline.</>
-              : <> With so few weeks of data, <b>{used.label}</b> does not beat the baseline yet; accuracy should improve as more requests are recorded.</>}
-          </div>
-        </div>
-      </div>
-
-      {/* 6. TABLE BY GROUP */}
+      {/* 4. TABLE BY GROUP */}
       <div className="panel">
         <div className="panel-h">
           <h3>Forecast by blood group<span className="sub">{isBank ? data.scope_name : "All verified blood banks combined"}</span></h3>
@@ -368,26 +279,14 @@ export default function DemandForecast({ bloodBankId = null }) {
             </tbody>
           </table>
         </div>
-      </div>
-
-      {/* 7. HOW IT WORKS */}
-      <div className="ft-path" style={{ borderRadius: 8, border: "1px solid #e8ebef" }}>
-        <b>How the forecast is calculated</b>
-        <ol style={{ margin: "4px 0 0 18px", padding: 0 }}>
-          <li><b>Demand</b> = units asked for in blood requests each week. <b>Supply</b> = units from completed donations each week (1 unit = 450 mL).</li>
-          <li><b>4-week average:</b> next week = the average of the last {m.avg_weeks} weeks.</li>
-          <li><b>Average + trend:</b> k weeks ahead = the average + trend × k. The trend is the slope of the best straight line through the last {m.trend_weeks} weeks (linear regression, y = mx + b).</li>
-          <li><b>Choosing the method:</b> each method is tested on past weeks. Of the two that can plan weeks ahead, the one with the lower <b>MAE</b> (average miss in units) is used; "Same as last week" is only the baseline to beat. Now using: <b>{m.used_label}</b>.</li>
-          <li><b>Stock after {m.horizon_weeks} weeks</b> = on hand + expected donations − expected requests. Below 0 = shortage; below the minimum = top up.</li>
-          <li><b>Days left</b> = units on hand ÷ (expected requests next week ÷ 7).</li>
-        </ol>
-        <div style={{ marginTop: 6, color: MUTED }}>
+        <div style={{ padding: "8px 14px 12px", fontSize: 12, color: MUTED }}>
           {isBank
             ? "Requests are counted across all of BloodLink, so the numbers show how your stock would hold up if your bank covered every request. "
             : ""}
           Cancelled requests are not counted. Decision support only: it does not replace blood bank procedures or medical decisions.
         </div>
       </div>
+
     </div>
   );
 }
