@@ -994,7 +994,7 @@ function AdminDashboard({ user, onLogout }) {
                     </div>
                     <div className="panel">
                       <div className="panel-h">
-                        <h3>Blood groups<span className="sub">Units donated vs requested, all time</span></h3>
+                        <h3>Blood groups<span className="sub">Donated and requested, all time</span></h3>
                       </div>
                       <BloodTypeBars rows={o.typeRows} />
                     </div>
