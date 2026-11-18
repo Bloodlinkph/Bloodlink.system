@@ -862,13 +862,13 @@ function AdminDashboard({ user, onLogout }) {
             <div className="top-r">
               <NotificationBell userId={user?.user_id} />
               <span className="vr" />
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button type="button" className="top-btn" onClick={() => goTo("profile")} title="Edit profile" aria-label="Edit profile" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="avatar">{initials(displayName)}</span>
-                <div className="who">
+                <span className="who">
                   <b>{displayName}</b>
                   <span>Administrator</span>
-                </div>
-              </div>
+                </span>
+              </button>
               <button type="button" className="top-btn" onClick={onLogout}>Log out</button>
             </div>
           </header>

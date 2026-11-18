@@ -526,10 +526,10 @@ import Loading from "./Loading";
                 <div className="top-r">
                 <NotificationBell userId={user.user_id} />
                 <span className="vr" />
-                <span className="top-btn" style={{ cursor: "default" }}>
+                <button type="button" className="top-btn" onClick={() => go("profile")} title="Edit profile" aria-label="Edit profile">
                     <span className="avatar">{initials}</span>
                     <span className="who"><b>{user.full_name || profile?.bank_name}</b><span>Blood bank</span></span>
-                </span>
+                </button>
                 <button type="button" className="top-btn" onClick={onLogout}>Log out</button>
                 </div>
             </header>
